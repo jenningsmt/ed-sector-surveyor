@@ -1,6 +1,6 @@
 """Orchestrates the gap-analysis pipeline for the GUI: per selected sector,
 extract -> bracketed gaps -> backward (and optionally forward) extrapolation,
-then aggregate all sectors into one master candidate list.
+then aggregate this session's candidate files into one master candidate list.
 
 Each stage is a thin call into the existing scripts/ modules' run() functions
 -- no pipeline logic is duplicated here, only sequencing, logging, and
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -220,6 +221,8 @@ def _run_gap_pipeline(
     sectors: list[str] = list(config.get("sectors") or [])
     stages: dict[str, bool] = config.get("stages") or {}
     dry_run: bool = bool(config.get("dry_run", True))
+    session_started = datetime.now(timezone.utc)
+    session_files: list[Path] = []
 
     if not sectors:
         print("No sectors selected. Nothing to do.")
@@ -308,7 +311,7 @@ def _run_gap_pipeline(
         if stages.get("bracketed_gaps", True) and not skip_edsm_stages:
             print(f"  -- Bracketed gaps ({sector}) --")
             try:
-                gap_full_export.run(
+                session_files += gap_full_export.run(
                     db_path=db_path,
                     sector=sector,
                     out_dir=out_dir,
@@ -330,7 +333,7 @@ def _run_gap_pipeline(
             )
             print(f"  -- Extrapolation ({sector}, direction={direction}) --")
             try:
-                gap_extrapolate_export.run(
+                session_files += gap_extrapolate_export.run(
                     db_path=db_path,
                     sector=sector,
                     out_dir=out_dir,
@@ -362,28 +365,44 @@ def _run_gap_pipeline(
         return 130
 
     # -------------------------------------------------------------------
-    # Stage: aggregation across all sectors present in out_dir
+    # Stage: aggregation of the candidate files written by this session
     # -------------------------------------------------------------------
     if stages.get("aggregate", True):
-        _run_aggregation(out_dir)
+        _run_aggregation(
+            out_dir, session_files, session_started,
+            scope=f"Sectors: {', '.join(sectors)}",
+        )
 
     print("\n=== Pipeline complete ===")
     return 0
 
 
-def _run_aggregation(out_dir: Path) -> None:
+def _run_aggregation(
+    out_dir: Path, session_files: list[Path], session_started: datetime, scope: str
+) -> None:
+    """Aggregate only the candidate files this session wrote -- never a scan
+    of out_dir, which would sweep in every earlier run's sectors and stale
+    files (e.g. forward-extrapolation CSVs from a run that had it enabled).
+    Each session gets its own timestamped master file."""
     print(">>> Stage: aggregation")
-    rows = aggregate_gap_master_list.load_rows(out_dir, sector_filter=None)
+    rows = aggregate_gap_master_list.load_rows_from_files(session_files)
     rows.sort(key=aggregate_gap_master_list.sort_key)
     if not rows:
-        print("  No not_in_edsm candidate rows found. Nothing to aggregate.")
+        print("  This session produced no not_in_edsm candidate rows. Nothing to aggregate.")
         return
     sectors_found = sorted({row.sector_slug for row in rows})
-    print(f"  {len(rows)} candidate rows across {len(sectors_found)} sector(s)")
-    csv_path = out_dir / "master_gap_candidates.csv"
-    md_path = out_dir / "master_gap_candidates.md"
+    print(f"  {len(rows)} candidate rows across {len(sectors_found)} sector(s) from this session")
+    stem = f"master_gap_candidates_{session_started.strftime('%Y%m%d-%H%M%S')}"
+    csv_path = out_dir / f"{stem}.csv"
+    md_path = out_dir / f"{stem}.md"
+    source_files = sorted({row.source_file for row in rows})
+    scope_lines = [
+        f"Session started (UTC): {session_started.isoformat(timespec='seconds')}  ",
+        f"{scope}  ",
+        f"Source files: {', '.join(f'`{name}`' for name in source_files)}",
+    ]
     aggregate_gap_master_list.write_master_csv(csv_path, rows)
-    aggregate_gap_master_list.write_master_md(md_path, rows)
+    aggregate_gap_master_list.write_master_md(md_path, rows, scope_lines=scope_lines)
 
 
 def _run_spatial_pipeline(
@@ -403,6 +422,7 @@ def _run_spatial_pipeline(
     sector_override: str = str(config.get("spatial_sector_override") or "").strip()
     stages: dict[str, bool] = config.get("stages") or {}
     dry_run: bool = bool(config.get("dry_run", True))
+    session_started = datetime.now(timezone.utc)
 
     if not center_system:
         print("No center system given. Nothing to do.")
@@ -456,7 +476,7 @@ def _run_spatial_pipeline(
             return 130
 
     try:
-        gap_spatial_export.run(
+        session_files = gap_spatial_export.run(
             db_path=db_path,
             sector=sector,
             center_system=center_system,
@@ -479,7 +499,10 @@ def _run_spatial_pipeline(
         return 130
 
     if stages.get("aggregate", True):
-        _run_aggregation(out_dir)
+        _run_aggregation(
+            out_dir, session_files, session_started,
+            scope=f"Spatial search: {center_system} within {radius_ly} ly ({sector})",
+        )
 
     print("\n=== Pipeline complete ===")
     return 0

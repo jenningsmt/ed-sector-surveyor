@@ -344,6 +344,14 @@ within an identical location. No composite "confidence score" is invented —
 the underlying data doesn't support anything more precise than structural
 ordering.
 
+The CLI scan above deliberately sweeps *everything* in `out/` (narrow it
+with `--sector`, or pass `--files` to aggregate specific CSVs). The GUI's
+"Aggregate master candidate list" stage is session-scoped instead: it
+aggregates only the candidate files written during that run and saves them
+as `master_gap_candidates_<YYYYMMDD-HHMMSS>.csv` + `.md` (UTC session start
+time), with the session's sectors and source files listed in the `.md`
+header. Earlier sessions' masters are left untouched.
+
 ## Dependencies
 
 For running from source: `pip install -r requirements.txt`. For building the

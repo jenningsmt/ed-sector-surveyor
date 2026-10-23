@@ -651,7 +651,9 @@ def run(
     dry_run: bool,
     cache_db_path: Optional[Path],
     cancel_event: Optional[threading.Event] = None,
-) -> None:
+) -> list[Path]:
+    """Returns the candidate files (csv + md per phase) written by this call
+    so the GUI pipeline can aggregate exactly this session's output."""
     sector = sector.strip()
     run_backward = direction in ("both", "backward")
     run_forward = direction in ("both", "forward")
@@ -692,6 +694,7 @@ def run(
     sector_slug = re.sub(r"[^a-z0-9]+", "_", sector.lower()).strip("_")
     effective_cache = cache_db_path or db_path
     suffix = "_dry_run" if dry_run else "_validated"
+    written: list[Path] = []
 
     # -------------------------------------------------------------------------
     # Backward phase
@@ -706,10 +709,11 @@ def run(
             out_dir / f"{stem}.md", bwd_candidates,
             sector, db_path, "backward", dry_run, len(names),
         )
+        written += [out_dir / f"{stem}.csv", out_dir / f"{stem}.md"]
 
     if cancel_event is not None and cancel_event.is_set():
         print("\nCancelled by user; skipping remaining phases.", flush=True)
-        return
+        return written
 
     # -------------------------------------------------------------------------
     # Forward chained phases
@@ -725,6 +729,7 @@ def run(
             out_dir / f"{stem1}.md", step1,
             sector, db_path, "forward step 1", dry_run, len(names),
         )
+        written += [out_dir / f"{stem1}.csv", out_dir / f"{stem1}.md"]
 
         # active_chains: (family, prefix) -> last confirmed in_edsm candidate
         active_chains: dict[tuple[str, str], ExtrapCandidate] = {
@@ -767,6 +772,7 @@ def run(
                 out_dir / f"{stem_n}.md", step_candidates,
                 sector, db_path, f"forward step {step} (chain)", dry_run, len(names),
             )
+            written += [out_dir / f"{stem_n}.csv", out_dir / f"{stem_n}.md"]
 
             # Advance active chains; record terminations
             new_active: dict[tuple[str, str], ExtrapCandidate] = {}
@@ -793,6 +799,8 @@ def run(
             )
         else:
             print("\n  No families extended beyond Spansh. No chain summary written.")
+
+    return written
 
 
 # =============================================================================

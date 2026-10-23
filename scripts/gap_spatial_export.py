@@ -325,7 +325,9 @@ def run(
     run_bracketed: bool = True,
     run_backward: bool = True,
     cancel_event: Optional[threading.Event] = None,
-) -> None:
+) -> list[Path]:
+    """Returns the candidate files (csv + md per phase) written by this call
+    so the GUI pipeline can aggregate exactly this session's output."""
     sector = sector.strip()
     center_system = center_system.strip()
 
@@ -357,6 +359,7 @@ def run(
     slug = f"{sanitize_prefix(sector)}_spatial_{sanitize_prefix(resolved_name)}"
     effective_cache = cache_db_path or db_path
     suffix = "_dry_run" if dry_run else "_validated"
+    written: list[Path] = []
 
     if run_bracketed:
         print(f"\n=== Phase: bracketed gaps ({len(names)} neighborhood systems) ===")
@@ -374,10 +377,11 @@ def run(
             out_dir / f"{stem}.md", validated, sector, resolved_name, radius_ly,
             db_path, dry_run, len(names),
         )
+        written += [out_dir / f"{stem}.csv", out_dir / f"{stem}.md"]
 
     if cancel_event is not None and cancel_event.is_set():
         print("\nCancelled by user; skipping remaining phases.", flush=True)
-        return
+        return written
 
     if run_backward:
         print(f"\n=== Phase: backward extrapolation ({len(names)} neighborhood systems) ===")
@@ -390,6 +394,9 @@ def run(
             out_dir / f"{stem}.md", bwd_candidates, sector, resolved_name, radius_ly,
             db_path, dry_run, len(names),
         )
+        written += [out_dir / f"{stem}.csv", out_dir / f"{stem}.md"]
+
+    return written
 
 
 # =============================================================================

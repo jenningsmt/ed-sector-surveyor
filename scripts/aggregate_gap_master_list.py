@@ -17,9 +17,13 @@ sides), then backward extrapolation, then forward-chain extrapolation
 (sub-sorted by steps_from_edge ascending, since confidence decays the further
 a chain has been extended past its last EDSM-confirmed system).
 
+The GUI pipeline doesn't scan out/: it passes the files written in that
+session to load_rows_from_files() so its master list is session-specific.
+
 Usage:
   python scripts/aggregate_gap_master_list.py --out-dir out
   python scripts/aggregate_gap_master_list.py --out-dir out --sector outopps --sector oochost
+  python scripts/aggregate_gap_master_list.py --out-dir out --files out/a_gap_full_validated.csv
 """
 
 from __future__ import annotations
@@ -105,8 +109,22 @@ def classify_file(path: Path) -> Optional[tuple[str, str]]:
 
 
 def load_rows(out_dir: Path, sector_filter: Optional[set[str]]) -> list[Row]:
+    """Scan every recognized candidate CSV in out_dir, regardless of which run
+    wrote it. The GUI uses load_rows_from_files() instead, so its master list
+    covers only the files written in that session."""
+    return load_rows_from_files(sorted(out_dir.glob("*.csv")), sector_filter)
+
+
+def load_rows_from_files(
+    paths: list[Path], sector_filter: Optional[set[str]] = None
+) -> list[Row]:
+    """Load not_in_edsm rows from exactly these files. Paths that aren't a
+    recognized candidate CSV (.md reports, chain summaries) or no longer
+    exist are skipped."""
     rows: list[Row] = []
-    for path in sorted(out_dir.glob("*.csv")):
+    for path in dict.fromkeys(Path(p) for p in paths):
+        if not path.is_file():
+            continue
         classified = classify_file(path)
         if classified is None:
             continue
@@ -192,7 +210,11 @@ def write_master_csv(out_path: Path, rows: list[Row]) -> None:
     print(f"  CSV: {out_path}  ({len(rows)} rows)")
 
 
-def write_master_md(out_path: Path, rows: list[Row]) -> None:
+def write_master_md(
+    out_path: Path, rows: list[Row], scope_lines: Optional[list[str]] = None
+) -> None:
+    """scope_lines, if given, are written under the title to record what
+    this master list covers (e.g. the GUI session's sectors and source files)."""
     by_sector: dict[str, list[Row]] = defaultdict(list)
     for row in rows:
         by_sector[row.sector_slug].append(row)
@@ -206,6 +228,10 @@ def write_master_md(out_path: Path, rows: list[Row]) -> None:
         f.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n")
         f.write(f"Sectors: {len(by_sector)}\n")
         f.write(f"Total candidates (not in EDSM): {len(rows)}\n\n")
+        if scope_lines:
+            for line in scope_lines:
+                f.write(f"{line}\n")
+            f.write("\n")
         f.write(
             "> Candidates are hypotheses, not confirmed systems. `bracketed_gap` "
             "(missing number strictly between two known systems in a naming "
@@ -273,6 +299,8 @@ def main() -> int:
                         help="Restrict to these sector slugs (repeatable); default: all sectors found")
     parser.add_argument("--output-prefix", default="master_gap_candidates",
                         help="Output filename prefix (default: master_gap_candidates)")
+    parser.add_argument("--files", nargs="+", type=Path, default=None,
+                        help="Aggregate only these candidate CSVs instead of scanning --out-dir")
     args = parser.parse_args()
 
     if not args.out_dir.exists():
@@ -281,8 +309,12 @@ def main() -> int:
 
     sector_filter = set(args.sector) if args.sector else None
 
-    print(f"Scanning {args.out_dir} for gap/extrapolation CSVs...")
-    rows = load_rows(args.out_dir, sector_filter)
+    if args.files:
+        print(f"Loading {len(args.files)} specified candidate file(s)...")
+        rows = load_rows_from_files(args.files, sector_filter)
+    else:
+        print(f"Scanning {args.out_dir} for gap/extrapolation CSVs...")
+        rows = load_rows(args.out_dir, sector_filter)
     rows.sort(key=sort_key)
 
     if not rows:

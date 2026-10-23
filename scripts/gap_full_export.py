@@ -381,7 +381,9 @@ def run(
     cache_db_path: Optional[Path],
     max_bracket_width: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
-) -> Path:
+) -> list[Path]:
+    """Returns the candidate files written by this call ([csv, md]) so the
+    GUI pipeline can aggregate exactly this session's output."""
     sector = sector.strip()
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Gap Full Export")
@@ -513,7 +515,7 @@ def run(
         f.write(f"**Total validated gap candidates: {len(validated_sorted)}**\n")
 
     print(f"  Written {len(validated_sorted)} candidates to: {out_path}")
-    return out_path
+    return [csv_path, out_path]
 
 
 # =============================================================================
@@ -575,7 +577,7 @@ Examples:
     max_bracket_width = args.max_bracket_width if args.max_bracket_width and args.max_bracket_width > 0 else None
 
     try:
-        out_path = run(
+        written = run(
             db_path=args.db,
             sector=args.sector,
             out_dir=args.out_dir,
@@ -587,7 +589,7 @@ Examples:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
     print()
-    print(f"Done. Report: {out_path}")
+    print(f"Done. Report: {written[-1]}")
 
 
 if __name__ == "__main__":
