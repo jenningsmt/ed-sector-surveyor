@@ -156,9 +156,9 @@ numbers roughly in order, so gaps in the known numbers are informative:
   confirming each step. Not currently part of the standard run for this
   project (see below) but available if needed.
 - **Spatial search** (`scripts/gap_spatial_export.py`) — the same bracketed-gap
-  and backward-extrapolation logic, but scoped to every system within a
-  chosen radius (light years) of a center system instead of an entire
-  sector prefix. Useful for a quick, targeted search around wherever you
+  and backward-extrapolation logic, but only for the boxels within a chosen
+  radius (light years) of a center system instead of an entire sector
+  prefix. Useful for a quick, targeted search around wherever you
   currently are in-game rather than analyzing a whole sector. See
   [Spatial search](#spatial-search) below.
 
@@ -312,21 +312,31 @@ python scripts/gap_spatial_export.py --db data/sector_library/sector_outopps.sql
 ```
 
 Requires the sector containing `--center-system` to already be extracted
-(step 2) — it doesn't touch the galaxy dump itself, only the sector DB. Finds
-every system within `--radius-ly` of the center system and runs bracketed-gap
-and backward-extrapolation candidate generation against just that
-neighborhood (`--direction bracketed_gap` / `backward` / `both`, default
-`both`). Writes `<slug>_spatial_gap_*` / `<slug>_spatial_backward_*` CSV +
+(step 2) — it doesn't touch the galaxy dump itself, only the sector DB. Runs
+bracketed-gap and backward-extrapolation candidate generation
+(`--direction bracketed_gap` / `backward` / `both`, default `both`) for every
+boxel in range of the center system: one whose known systems' centroid, or
+any one of its known systems, lies within `--radius-ly`. The second
+condition keeps boxels that straddle the sphere's edge. Candidates are
+always checked against every known system in the sector DB, not just those
+inside the sphere. Writes `<slug>_spatial_gap_*` / `<slug>_spatial_backward_*` CSV +
 Markdown into `--out-dir`, picked up by the aggregator like any other sector
 output. In the GUI, switch the **Run** tab's Mode to **Spatial** and fill in
 Center system / Radius (ly) — the sector is auto-detected from the center
 system's name unless you set an override.
 
-Because the "known systems" universe for this search is deliberately
-restricted to the chosen radius, a real undiscovered system just outside
-that radius can occasionally surface as a false-positive backward candidate.
-EDSM validation still filters out anything that's actually a known system —
-this is a structural side effect of scoping the search spatially, not a bug.
+The spatial CSVs add a `boxel_distance_ly` column: the distance from the
+center to the candidate boxel's known-system centroid. It can slightly
+exceed the radius for a boxel straddling the edge, and an undiscovered
+system can sit anywhere in its boxel's cube (20–160 ly across, by mass code).
+
+**Fixed in v1.5.1:** earlier versions treated only systems *inside* the
+radius as known, so known systems just outside it — sequence neighbours of
+systems inside — came back as bracketed-gap and backward "candidates". EDSM
+validation doesn't reliably catch these, because Spansh holds many systems
+EDSM doesn't. Around a well-explored hub, almost all of an older spatial
+run's results can be already-known systems; re-run any spatial search made
+before v1.5.1.
 
 ### 4. Aggregation
 
@@ -517,8 +527,8 @@ with a bracket-width cap, and backward/forward extrapolation gated by EDSM
 confirmation — no computed composite score, no scored spatial-anchoring tier
 (the doc's `density_score`-weighted neighborhood concept). `gap_spatial_export.py`'s
 "spatial search" is a different, later addition: an unscored radius filter on
-which systems count as "known" for the same bracketed-gap/backward logic, not
-the doc's confidence-weighted anchoring. Treat the doc as background on the
+which boxels the same bracketed-gap/backward logic is applied to, not the
+doc's confidence-weighted anchoring. Treat the doc as background on the
 *reasoning* behind the approach, not as a spec that matches the current code
 line-for-line.
 
@@ -542,8 +552,9 @@ write CSVs with a shared schema (see `scripts/gap_naming.py`) so
 | `boxel` | Just the boxel number, e.g. `1` |
 | `number` | The candidate's trailing serial number |
 
-`gap_spatial_export.py`'s CSVs add two more columns: `center_system` and
-`radius_ly`, recording the search that produced each row.
+`gap_spatial_export.py`'s CSVs add three more columns: `center_system` and
+`radius_ly`, recording the search that produced each row, and
+`boxel_distance_ly` (see [Spatial search](#spatial-search)).
 
 **Sample output**: [`sample_master_gap_candidates.csv`](docs/samples/sample_master_gap_candidates.csv)
 / [`.md`](docs/samples/sample_master_gap_candidates.md) — real, EDSM-validated

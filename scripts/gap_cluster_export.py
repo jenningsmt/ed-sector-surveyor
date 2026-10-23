@@ -217,7 +217,7 @@ def nested_complete_linkage(
     partition reproduces the region_ly cut of the same tree."""
     clusters = complete_linkage(len(points), _neighbor_pairs(points, cluster_ly))
     groups = [[points[i] for i in c] for c in clusters]
-    centroids = [_centroid(g) for g in groups]
+    centroids = [centroid(g) for g in groups]
     # A group centroid gap never exceeds the max member-pair distance, so
     # centroid proximity is a safe prefilter for the region-level pairs.
     candidate_pairs = _neighbor_pairs(centroids, region_ly)
@@ -233,7 +233,7 @@ def nested_complete_linkage(
     return clusters, regions
 
 
-def _centroid(points: list[Point]) -> Point:
+def centroid(points: list[Point]) -> Point:
     n = len(points)
     return (sum(p[0] for p in points) / n, sum(p[1] for p in points) / n, sum(p[2] for p in points) / n)
 
@@ -349,7 +349,7 @@ def run(
         mates = known.get(key)
         if mates:
             boxels.append(key)
-            positions.append(_centroid([p for _, p in mates]))
+            positions.append(centroid([p for _, p in mates]))
         elif origin is not None:
             # No known boxel-mates, but the grid is confirmed: use the cube centre.
             row = by_boxel[key][0]
@@ -375,8 +375,8 @@ def run(
     # --- order regions from start_point, then clusters within each region,
     #     each region entered nearest the previous region's last cluster ---
     cluster_points = [[positions[i] for i in c] for c in clusters]
-    cluster_cen = [_centroid(pts) for pts in cluster_points]
-    region_cen = [_centroid([p for ci in r for p in cluster_points[ci]]) for r in regions]
+    cluster_cen = [centroid(pts) for pts in cluster_points]
+    region_cen = [centroid([p for ci in r for p in cluster_points[ci]]) for r in regions]
     first = min(range(len(regions)), key=lambda r: math.dist(region_cen[r], start_point))
     region_order = visiting_order(region_cen, first)
 

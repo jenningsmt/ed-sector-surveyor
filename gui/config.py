@@ -25,7 +25,7 @@ _OLD_APP_NAMES = ["SectorSurveyor", "SectorGapAnalyzer"]
 # Displayed in the window title. Keep in sync with installer.iss's
 # MyAppVersion and version_info.txt's filevers/prodvers/FileVersion/
 # ProductVersion when cutting a new release.
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 
 def _default_workspace_dir() -> str:

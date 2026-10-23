@@ -4,18 +4,20 @@ gap_spatial_export.py — Spatial (radius-around-a-system) gap analysis.
 =============================================================================
 Companion to gap_full_export.py / gap_extrapolate_export.py. Runs the same
 two candidate-generation methods those scripts use -- bracketed gaps and
-backward extrapolation -- but scopes the "known systems" universe to a
-sphere of --radius-ly around --center-system instead of an entire sector.
+backward extrapolation -- but only for the part of the sector within
+--radius-ly of --center-system.
 
-This mirrors how edmfi-mfi's planner_strategic "spatial" mode works
-(planner_strategic/extract.py::_extract_systems, mode == "spatial"): the
-radius-filtered system list becomes the *entire* candidate-generation input,
-not just a display filter over full-sector results. A real, undiscovered
-system that happens to sit just outside the search radius could in principle
-still surface as a false-positive "backward" candidate (its sequence
-neighbor inside the radius has no way to know about it) -- this is an
-inherent characteristic of scoping the search this way, not a bug, and
-EDSM validation still catches any candidate that's actually a known system.
+Candidates are generated against every known system in the sector DB, then
+kept if their boxel (subsector + mass code + boxel number, i.e. one naming
+sequence) is in range: the centroid of the boxel's known systems, or any one
+of them, lies within the radius. The second condition keeps boxels that
+straddle the sphere's edge.
+
+Before v1.5.1 only systems *inside* the sphere counted as known, so a known
+system just outside it -- a sequence neighbour of something inside --
+came back as a "candidate". EDSM validation doesn't reliably catch these,
+since Spansh holds many systems EDSM doesn't; around well-explored hubs most
+results were already-known systems.
 
 No forward extrapolation here -- edge-relative "how far beyond the known
 max" reasoning is normally sector-relative and doesn't translate cleanly to
@@ -26,6 +28,8 @@ OUTPUTS (written to --out-dir)
 -------------------------------
   <slug>_spatial_gap_validated.csv / .md        (bracketed gaps)
   <slug>_spatial_backward_validated.csv / .md   (backward extrapolation)
+  CSVs carry boxel_distance_ly: center to the candidate boxel's known-system
+  centroid (can slightly exceed the radius for boxels straddling its edge).
   <slug> = sanitize_prefix(sector) + "_spatial_" + sanitize_prefix(center_system)
 
 Usage:
@@ -45,15 +49,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sqlite3
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 try:
-    from scripts import gap_naming
+    from scripts import gap_cluster_export, gap_naming
     from scripts.gap_full_export import (
         build_sequences,
         generate_bracketed_gaps,
@@ -66,6 +71,7 @@ try:
     )
     from scripts.extract_sector_systems_to_sqlite import sanitize_prefix
 except ImportError:
+    import gap_cluster_export
     import gap_naming
     from gap_full_export import build_sequences, generate_bracketed_gaps, validate_candidates
     from gap_extrapolate_export import ExtrapCandidate, build_backward_candidates, validate_phase
@@ -127,6 +133,52 @@ def load_neighborhood(
     return [row[0] for row in cursor.fetchall()]
 
 
+class SpatialCandidates(NamedTuple):
+    bracketed: list[str]
+    backward: list[ExtrapCandidate]
+    distance_ly: dict[str, float]  # candidate name -> boxel_distance_ly
+    boxels_in_range: int
+
+
+def find_spatial_candidates(
+    db_path: Path,
+    center: tuple[float, float, float],
+    radius_ly: float,
+    max_bracket_width: Optional[int] = None,
+    extend_depth: int = DEFAULT_EXTEND_DEPTH,
+    run_bracketed: bool = True,
+    run_backward: bool = True,
+) -> SpatialCandidates:
+    """Candidates whose boxel is within radius_ly of center, checked against
+    every known system in the DB (not just those inside the sphere).
+
+    A boxel is one naming sequence, and both methods look only within a
+    sequence, so generating from the in-range boxels' full member lists
+    gives exactly the sector-wide candidates for those boxels."""
+    by_boxel, _, _ = gap_cluster_export.load_known_by_boxel(db_path)
+    boxel_distance: dict[tuple[str, str], float] = {}
+    for key, mates in by_boxel.items():
+        d = math.dist(gap_cluster_export.centroid([p for _, p in mates]), center)
+        if d <= radius_ly or any(math.dist(p, center) <= radius_ly for _, p in mates):
+            boxel_distance[key] = d
+
+    names = [name for key in boxel_distance for name, _ in by_boxel[key]]
+    known = set(names)
+    bracketed: list[str] = []
+    if run_bracketed:
+        raw = generate_bracketed_gaps(build_sequences(names), max_bracket_width=max_bracket_width)
+        bracketed = [c for c in dict.fromkeys(raw) if c not in known]
+    backward = build_backward_candidates(names, extend_depth) if run_backward else []
+
+    distance_ly: dict[str, float] = {}
+    for name in bracketed + [c.system_name for c in backward]:
+        parsed = gap_naming.parse_sequence_name(name)
+        if parsed is not None:
+            key = gap_cluster_export.boxel_key(parsed[0], parsed[1])
+            distance_ly[name] = boxel_distance.get(key, math.nan)
+    return SpatialCandidates(bracketed, backward, distance_ly, len(boxel_distance))
+
+
 # =============================================================================
 # Output writers
 # =============================================================================
@@ -137,6 +189,7 @@ def write_spatial_gap_csv(
     dry_run: bool,
     center_system: str,
     radius_ly: float,
+    distance_ly: dict[str, float],
 ) -> None:
     edsm_status = "skipped" if dry_run else "not_in_edsm"
     rows = []
@@ -150,7 +203,7 @@ def write_spatial_gap_csv(
         writer.writerow([
             "system_name", "edsm_status", "direction", "steps_from_edge",
             "spansh_edge_number", "family", "subsector", "mass_prefix",
-            "mass_code", "boxel", "number", "center_system", "radius_ly",
+            "mass_code", "boxel", "number", "center_system", "radius_ly", "boxel_distance_ly",
         ])
         for name, family, prefix, number in sorted(rows, key=lambda r: gap_naming.group_sort_key(r[0])):
             tokens = [t for t in name.split() if t]
@@ -160,9 +213,13 @@ def write_spatial_gap_csv(
             writer.writerow([
                 name, edsm_status, "bracketed_gap", "", "",
                 family, subsector, prefix.rstrip("-"), mass_code, boxel, number,
-                center_system, radius_ly,
+                center_system, radius_ly, _fmt_distance(distance_ly.get(name)),
             ])
     print(f"  CSV:  {out_path}  ({len(rows)} rows)")
+
+
+def _fmt_distance(d: Optional[float]) -> str:
+    return "" if d is None or math.isnan(d) else f"{d:.1f}"
 
 
 def write_spatial_gap_markdown(
@@ -224,6 +281,7 @@ def write_spatial_backward_csv(
     candidates: list[ExtrapCandidate],
     center_system: str,
     radius_ly: float,
+    distance_ly: dict[str, float],
 ) -> None:
     ordered = sorted(
         candidates,
@@ -234,13 +292,14 @@ def write_spatial_backward_csv(
         writer.writerow([
             "system_name", "edsm_status", "direction", "steps_from_edge",
             "spansh_edge_number", "family", "subsector", "mass_prefix",
-            "mass_code", "boxel", "number", "center_system", "radius_ly",
+            "mass_code", "boxel", "number", "center_system", "radius_ly", "boxel_distance_ly",
         ])
         for c in ordered:
             writer.writerow([
                 c.system_name, c.edsm_status, c.direction, c.steps_from_edge,
                 c.edge_number, c.family, c.subsector, c.prefix.rstrip("-"),
                 c.mass_code, c.boxel, c.number, center_system, radius_ly,
+                _fmt_distance(distance_ly.get(c.system_name)),
             ])
     print(f"  CSV:  {out_path}  ({len(candidates)} rows)")
 
@@ -279,7 +338,7 @@ def write_spatial_backward_markdown(
             f.write(f"## {title}\n\n")
             ordered = sorted(group, key=lambda c: (c.subsector, c.mass_code, c.boxel, c.number))
             for c in ordered:
-                f.write(f"  - {c.system_name}  *(step {c.steps_from_edge} below neighborhood min)*\n")
+                f.write(f"  - {c.system_name}  *(step {c.steps_from_edge} below known min)*\n")
             f.write(f"\n*{len(group)} candidate(s)*\n\n")
 
         if dry_run:
@@ -355,6 +414,13 @@ def run(
             f"No systems found within {radius_ly} ly of {center_system!r}."
         )
 
+    found = find_spatial_candidates(
+        db_path, (cx, cy, cz), radius_ly,
+        max_bracket_width=max_bracket_width, extend_depth=extend_depth,
+        run_bracketed=run_bracketed, run_backward=run_backward,
+    )
+    print(f"  {found.boxels_in_range} boxels in range (candidates checked against the whole sector DB)")
+
     out_dir.mkdir(parents=True, exist_ok=True)
     slug = f"{sanitize_prefix(sector)}_spatial_{sanitize_prefix(resolved_name)}"
     effective_cache = cache_db_path or db_path
@@ -362,17 +428,14 @@ def run(
     written: list[Path] = []
 
     if run_bracketed:
-        print(f"\n=== Phase: bracketed gaps ({len(names)} neighborhood systems) ===")
-        sequences = build_sequences(names)
-        candidates_raw = generate_bracketed_gaps(sequences, max_bracket_width=max_bracket_width)
-        known_names = set(names)
-        candidates_unique = [c for c in dict.fromkeys(candidates_raw) if c not in known_names]
-        print(f"  {len(candidates_unique)} bracketed gap candidates generated")
+        print(f"\n=== Phase: bracketed gaps ({found.boxels_in_range} boxels in range) ===")
+        print(f"  {len(found.bracketed)} bracketed gap candidates generated")
         validated = validate_candidates(
-            candidates_unique, effective_cache, dry_run=dry_run, cancel_event=cancel_event
+            found.bracketed, effective_cache, dry_run=dry_run, cancel_event=cancel_event
         )
         stem = f"{slug}_spatial_gap{suffix}"
-        write_spatial_gap_csv(out_dir / f"{stem}.csv", validated, dry_run, resolved_name, radius_ly)
+        write_spatial_gap_csv(out_dir / f"{stem}.csv", validated, dry_run, resolved_name, radius_ly,
+                              found.distance_ly)
         write_spatial_gap_markdown(
             out_dir / f"{stem}.md", validated, sector, resolved_name, radius_ly,
             db_path, dry_run, len(names),
@@ -384,12 +447,13 @@ def run(
         return written
 
     if run_backward:
-        print(f"\n=== Phase: backward extrapolation ({len(names)} neighborhood systems) ===")
-        bwd_candidates = build_backward_candidates(names, extend_depth)
+        print(f"\n=== Phase: backward extrapolation ({found.boxels_in_range} boxels in range) ===")
+        bwd_candidates = found.backward
         print(f"  {len(bwd_candidates)} backward candidates generated")
         validate_phase(bwd_candidates, effective_cache, dry_run, cancel_event=cancel_event)
         stem = f"{slug}_spatial_backward{suffix}"
-        write_spatial_backward_csv(out_dir / f"{stem}.csv", bwd_candidates, resolved_name, radius_ly)
+        write_spatial_backward_csv(out_dir / f"{stem}.csv", bwd_candidates, resolved_name, radius_ly,
+                                   found.distance_ly)
         write_spatial_backward_markdown(
             out_dir / f"{stem}.md", bwd_candidates, sector, resolved_name, radius_ly,
             db_path, dry_run, len(names),

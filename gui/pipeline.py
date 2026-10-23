@@ -62,8 +62,6 @@ def _estimate_candidates_from_names(
     names: list[str],
     stages: dict[str, bool],
     config: dict[str, Any],
-    *,
-    include_forward: bool = True,
 ) -> dict[str, int]:
     """Local-only (no network) candidate counts for each enabled EDSM-bound
     stage, computed with the exact same functions those stages use to
@@ -84,7 +82,7 @@ def _estimate_candidates_from_names(
         )
         per_stage["Backward extrapolation"] = len(bwd)
 
-    if include_forward and stages.get("forward_extrap", False):
+    if stages.get("forward_extrap", False):
         fwd = gap_extrapolate_export.build_forward_step1_candidates(names)
         per_stage["Forward extrapolation (step 1 only; chain steps not estimated)"] = len(fwd)
 
@@ -115,7 +113,19 @@ def _estimate_spatial_candidates(
         names = gap_spatial_export.load_neighborhood(conn, cx, cy, cz, radius_ly)
     finally:
         conn.close()
-    per_stage = _estimate_candidates_from_names(names, stages, config, include_forward=False)
+    # Same candidate selection the spatial stage runs, so the counts match.
+    found = gap_spatial_export.find_spatial_candidates(
+        db_path, (cx, cy, cz), radius_ly,
+        max_bracket_width=config.get("max_bracket_width", 25),
+        extend_depth=config.get("extend_depth", 5),
+        run_bracketed=stages.get("bracketed_gaps", True),
+        run_backward=stages.get("backward_extrap", True),
+    )
+    per_stage: dict[str, int] = {}
+    if stages.get("bracketed_gaps", True):
+        per_stage["Bracketed gaps"] = len(found.bracketed)
+    if stages.get("backward_extrap", True):
+        per_stage["Backward extrapolation"] = len(found.backward)
     total = sum(per_stage.values())
     return {
         "sector": f"{resolved_name} (within {radius_ly} ly)",
