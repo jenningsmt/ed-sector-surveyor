@@ -193,6 +193,9 @@ method (bracketed gap, backward, spatial, etc.) found them.
         │
         ▼
 4. Cross-sector aggregation → out/            — scripts/aggregate_gap_master_list.py
+        │
+        ▼
+5. Survey clusters (regions → clusters, map)  — scripts/gap_cluster_export.py
 ```
 
 A separate, optional path (`scripts/sector_survey.py`) surveys an already-
@@ -352,6 +355,48 @@ as `master_gap_candidates_<YYYYMMDD-HHMMSS>.csv` + `.md` (UTC session start
 time), with the session's sectors and source files listed in the `.md`
 header. Earlier sessions' masters are left untouched.
 
+### 5. Survey clusters
+
+```bash
+python scripts/gap_cluster_export.py --db data/sector_library/sector_Outopps.sqlite \
+    --sector Outopps --files out/outopps_gap_full_validated.csv out/outopps_extrap_backward_validated.csv
+```
+
+Candidates are undiscovered, so they have no coordinates — but each one's
+**boxel** (subsector + mass code + boxel number, e.g. `AS-S c17`) is a fixed
+cube of space, and the sector DB almost always holds known systems in that
+same boxel. Each candidate boxel is placed at the centroid of those known
+boxel-mates, then grouped into nested proximity groups for planning a field
+survey:
+
+- **Regions** — at most `--region-ly` across (default 450 ly)
+- **Survey clusters** inside each region — at most `--cluster-ly` across
+  (default 150 ly)
+
+Both levels are cuts of one complete-linkage tree, so clusters always nest
+inside regions. Regions, and clusters within each region, are numbered in a
+suggested visiting order (nearest-neighbour + 2-opt) starting from the region
+nearest Sol, or `--start-system`. Each cluster names a known system near its
+centre ("Plot to") to use as a galaxy-map route destination.
+
+Grouping on the bare subsector letters would be wrong: the same letters
+recur for every mass code, hundreds of light years apart.
+
+For procedurally named sectors the boxel's cube is also decoded from the name
+(`cube_*` columns), once the sector's own known systems confirm the grid;
+hand-authored sectors (e.g. "NGC 1528 Sector") don't follow that grid, so
+those columns stay blank there. Either way, a candidate can be anywhere
+inside its boxel's cube (edge: b 20 ly, c 40 ly, d 80 ly, e 160 ly), so
+treat cluster outlines as approximate.
+
+Outputs: `<sector>_survey_clusters.md` (report), `.csv` (one row per
+cluster), `.svg` (plan + side-view map; hover a dot for its cluster/boxel),
+and `<sector>_candidates_clustered.csv` (every candidate with its region,
+cluster, boxel position and anchor system). In the GUI this is the "Survey
+clusters" stage, run per sector on that session's EDSM-validated candidates
+(skipped on dry runs, which have none); cluster/region sizes are under
+Parameters.
+
 ## Dependencies
 
 For running from source: `pip install -r requirements.txt`. For building the
@@ -422,6 +467,7 @@ scripts/
   gap_extrapolate_export.py             Backward/forward extrapolation candidates + EDSM validation
   gap_spatial_export.py                 Bracketed gaps + backward extrapolation within a radius of a system
   aggregate_gap_master_list.py          Merge per-sector CSVs into one master candidate list
+  gap_cluster_export.py                 Group candidates into nested survey regions/clusters by boxel location, with map
   sector_survey.py                      High-value system survey for an extracted sector DB (independent of gap pipeline)
   pencil_sector_survey.py               One-off hardcoded survey script for the Pencil Sector (not general-purpose)
 
@@ -438,6 +484,8 @@ installer.iss            Inno Setup script that wraps the PyInstaller build into
 icon.ico / icon.png       App icon (.ico is what's actually embedded in the build)
 requirements.txt          Runtime dependencies
 requirements-dev.txt      Adds build-time dependencies (PyInstaller) on top of requirements.txt
+
+tests/                   Standard-library unittest suite: python -m unittest discover -s tests
 
 data/sector_library/     Extracted per-sector SQLite DBs + summary reports (gitignored: *.sqlite, *.md)
 out/                     Generated candidate CSVs/Markdown reports (gitignored)

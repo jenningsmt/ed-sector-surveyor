@@ -1,6 +1,7 @@
 """Orchestrates the gap-analysis pipeline for the GUI: per selected sector,
 extract -> bracketed gaps -> backward (and optionally forward) extrapolation,
-then aggregate this session's candidate files into one master candidate list.
+then aggregate this session's candidate files into one master candidate list
+and group each sector's candidates into survey clusters.
 
 Each stage is a thin call into the existing scripts/ modules' run() functions
 -- no pipeline logic is duplicated here, only sequencing, logging, and
@@ -19,6 +20,7 @@ from scripts import (
     aggregate_gap_master_list,
     bio_opportunity_export,
     extract_multi_sector_to_sqlite,
+    gap_cluster_export,
     gap_extrapolate_export,
     gap_full_export,
     gap_naming,
@@ -222,7 +224,7 @@ def _run_gap_pipeline(
     stages: dict[str, bool] = config.get("stages") or {}
     dry_run: bool = bool(config.get("dry_run", True))
     session_started = datetime.now(timezone.utc)
-    session_files: list[Path] = []
+    sector_files: dict[str, list[Path]] = {sector: [] for sector in sectors}
 
     if not sectors:
         print("No sectors selected. Nothing to do.")
@@ -311,7 +313,7 @@ def _run_gap_pipeline(
         if stages.get("bracketed_gaps", True) and not skip_edsm_stages:
             print(f"  -- Bracketed gaps ({sector}) --")
             try:
-                session_files += gap_full_export.run(
+                sector_files[sector] += gap_full_export.run(
                     db_path=db_path,
                     sector=sector,
                     out_dir=out_dir,
@@ -333,7 +335,7 @@ def _run_gap_pipeline(
             )
             print(f"  -- Extrapolation ({sector}, direction={direction}) --")
             try:
-                session_files += gap_extrapolate_export.run(
+                sector_files[sector] += gap_extrapolate_export.run(
                     db_path=db_path,
                     sector=sector,
                     out_dir=out_dir,
@@ -369,9 +371,18 @@ def _run_gap_pipeline(
     # -------------------------------------------------------------------
     if stages.get("aggregate", True):
         _run_aggregation(
-            out_dir, session_files, session_started,
+            out_dir, [p for files in sector_files.values() for p in files], session_started,
             scope=f"Sectors: {', '.join(sectors)}",
         )
+
+    if stages.get("cluster", True):
+        for sector in sectors:
+            if _cancelled(cancel_event):
+                print("Cancelled before survey clustering.")
+                return 130
+            if sector_files[sector]:
+                _run_clustering(config, sector_db_path(project_dir, sector), sector,
+                                sector_files[sector], out_dir, dry_run)
 
     print("\n=== Pipeline complete ===")
     return 0
@@ -403,6 +414,33 @@ def _run_aggregation(
     ]
     aggregate_gap_master_list.write_master_csv(csv_path, rows)
     aggregate_gap_master_list.write_master_md(md_path, rows, scope_lines=scope_lines)
+
+
+def _run_clustering(
+    config: dict[str, Any],
+    db_path: Path,
+    sector: str,
+    files: list[Path],
+    out_dir: Path,
+    dry_run: bool,
+    label: Optional[str] = None,
+) -> None:
+    print(f">>> Stage: survey clusters ({label or sector})")
+    if dry_run:
+        print("  Skipped: dry-run output has no EDSM-validated candidates to cluster.")
+        return
+    try:
+        gap_cluster_export.run(
+            db_path=db_path,
+            sector=sector,
+            candidate_files=files,
+            out_dir=out_dir,
+            region_ly=float(config.get("cluster_region_ly", gap_cluster_export.DEFAULT_REGION_LY)),
+            cluster_ly=float(config.get("cluster_ly", gap_cluster_export.DEFAULT_CLUSTER_LY)),
+            label=label,
+        )
+    except Exception as exc:
+        print(f"  SKIP survey clusters for {label or sector!r}: {exc}")
 
 
 def _run_spatial_pipeline(
@@ -503,6 +541,10 @@ def _run_spatial_pipeline(
             out_dir, session_files, session_started,
             scope=f"Spatial search: {center_system} within {radius_ly} ly ({sector})",
         )
+
+    if stages.get("cluster", True) and session_files:
+        _run_clustering(config, db_path, sector, session_files, out_dir, dry_run,
+                        label=f"{sector} spatial {center_system}")
 
     print("\n=== Pipeline complete ===")
     return 0
