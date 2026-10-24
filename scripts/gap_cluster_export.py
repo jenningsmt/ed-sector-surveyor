@@ -78,6 +78,13 @@ CANDIDATE_RANK = {
     "backward_extrap": 1, "spatial_backward_extrap": 1,
     "forward_extrap": 2,
 }
+# The source CSVs' `direction` values, restored so this file carries every
+# column a plain candidate list has (Expedition Tracker relies on them).
+DIRECTION = {
+    "bracketed_gap": "bracketed_gap", "spatial_gap": "bracketed_gap",
+    "backward_extrap": "backward", "spatial_backward_extrap": "backward",
+    "forward_extrap": "forward",
+}
 _COORDS_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$")
 
 Point = tuple[float, float, float]
@@ -508,12 +515,15 @@ def run(
             for row in boxel_rows:
                 cand_out.append({
                     "visit_order": len(cand_out) + 1,
-                    "region": region_name[region_of_cluster[c]],
+                    "survey_region": region_name[region_of_cluster[c]],
                     "cluster": cluster_name[c],
                     "cluster_stop": stop,
                     "boxel_id": f"{row.subsector} {key[1]}",
                     "system_name": row.system_name,
                     "candidate_type": row.candidate_type,
+                    "edsm_status": "not_in_edsm",
+                    "direction": DIRECTION.get(row.candidate_type, ""),
+                    "family": row.family,
                     "steps_from_edge": row.steps_from_edge,
                     "subsector": row.subsector,
                     "mass_code": row.mass_code,
@@ -529,8 +539,10 @@ def run(
     for key in unplaced:
         for row in sorted(by_boxel[key], key=evidence_order):
             cand_out.append({
-                "region": "", "cluster": "", "boxel_id": f"{row.subsector} {key[1]}",
+                "survey_region": "", "cluster": "", "boxel_id": f"{row.subsector} {key[1]}",
                 "system_name": row.system_name, "candidate_type": row.candidate_type,
+                "edsm_status": "not_in_edsm", "direction": DIRECTION.get(row.candidate_type, ""),
+                "family": row.family,
                 "steps_from_edge": row.steps_from_edge, "subsector": row.subsector,
                 "mass_code": row.mass_code, "mass_prefix": key[1], "number": row.number,
                 "boxel_known_count": 0,
@@ -541,13 +553,13 @@ def run(
     # so it's unique and sorts the whole file on its own.
     region_count: Counter = Counter()
     for row in cand_out:
-        if row["region"]:
-            region_count[row["region"]] += 1
-            row["region_visit"] = region_count[row["region"]]
+        if row["survey_region"]:
+            region_count[row["survey_region"]] += 1
+            row["region_visit"] = region_count[row["survey_region"]]
 
     cand_fields = [
-        "visit_order", "region", "region_visit", "cluster", "cluster_stop", "boxel_id", "system_name",
-        "candidate_type", "steps_from_edge",
+        "visit_order", "survey_region", "region_visit", "cluster", "cluster_stop", "boxel_id", "system_name",
+        "candidate_type", "edsm_status", "direction", "family", "steps_from_edge",
         "subsector", "mass_code", "mass_prefix", "number", "boxel_known_count",
         "boxel_x", "boxel_y", "boxel_z", "cube_min_x", "cube_min_y", "cube_min_z",
         "cube_size_ly", "anchor_known_system",
@@ -570,7 +582,7 @@ def run(
         types = Counter(r.candidate_type for r in crows)
         cluster_rows.append({
             "cluster": cluster_name[c],
-            "region": region_name[region_of_cluster[c]],
+            "survey_region": region_name[region_of_cluster[c]],
             "first_visit_order": first_visit[cluster_name[c]],
             "centroid_x": f"{cen[0]:.1f}", "centroid_y": f"{cen[1]:.1f}", "centroid_z": f"{cen[2]:.1f}",
             "diameter_ly": f"{_diameter(cluster_points[c]):.1f}",
@@ -591,7 +603,7 @@ def run(
     region_rows = []
     for r in region_order:
         name = region_name[r]
-        crs = [x for x in cluster_rows if x["region"] == name]
+        crs = [x for x in cluster_rows if x["survey_region"] == name]
         region_rows.append({
             "region": name,
             "centroid": region_cen[r],
@@ -666,7 +678,7 @@ def _write_report(path, label, db_path, rows, boxels, unplaced, unplaced_candida
             f.write("| Cluster | Centroid (x, y, z) | Across ly | Boxels | Candidates | Gap | Extrap | Mass codes | Plot to |\n")
             f.write("|---|---|--:|--:|--:|--:|--:|---|---|\n")
             for c in cluster_rows:
-                if c["region"] == r["region"]:
+                if c["survey_region"] == r["region"]:
                     cen = (float(c["centroid_x"]), float(c["centroid_y"]), float(c["centroid_z"]))
                     f.write(f"| {c['cluster']} | {xyz(cen)} | {float(c['diameter_ly']):.0f} | {c['boxels']} | "
                             f"{c['candidates']} | {c['bracketed_gap']} | {c['extrapolated']} | "

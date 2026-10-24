@@ -171,7 +171,7 @@ class RunTest(unittest.TestCase):
         name = f"{self.SECTOR} {{}}".format
         near = {rows[name(n)]["cluster"] for n in ("AB-C c3-5", "AB-C c3-6", "AD-C c3-2")}
         self.assertEqual(len(near), 1)
-        self.assertNotEqual(rows[name("ZZ-Y d9-4")]["region"], rows[name("AB-C c3-5")]["region"])
+        self.assertNotEqual(rows[name("ZZ-Y d9-4")]["survey_region"], rows[name("AB-C c3-5")]["survey_region"])
         # Starting from Sol, the region at the origin comes first.
         self.assertEqual(rows[name("AB-C c3-5")]["cluster"], "R01-C01")
         # No known boxel-mates and no confirmed grid: listed but unplaced.
@@ -198,10 +198,17 @@ class RunTest(unittest.TestCase):
         self.assertEqual([int(r["visit_order"]) for r in ordered], list(range(1, len(ordered) + 1)))
         self.assertEqual(rows[-1]["system_name"], f"{self.SECTOR} QQ-Q b1-0")  # unplaced, last
         self.assertEqual(rows[-1]["region_visit"], "")
+        # Expedition Tracker compatibility: it adds its own `region` (galactic
+        # region) column and needs the plain candidate list's status columns.
+        self.assertNotIn("region", rows[0])
+        self.assertEqual({r["edsm_status"] for r in rows}, {"not_in_edsm"})
+        directions = {r["system_name"].split()[-1]: r["direction"] for r in rows}
+        self.assertEqual((directions["c3-5"], directions["c3-0"]), ("bracketed_gap", "backward"))
+        self.assertEqual(rows[0]["family"], f"{self.SECTOR} AB-C")
         # region_visit restarts at 1 in each region and counts up with visit_order.
         by_region = {}
         for r in ordered:
-            by_region.setdefault(r["region"], []).append(int(r["region_visit"]))
+            by_region.setdefault(r["survey_region"], []).append(int(r["region_visit"]))
         self.assertGreater(len(by_region), 1)
         for counts in by_region.values():
             self.assertEqual(counts, list(range(1, len(counts) + 1)))

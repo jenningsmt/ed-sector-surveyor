@@ -424,8 +424,13 @@ treat cluster outlines as approximate.
 
 Outputs: `<sector>_survey_clusters.md` (report), `.csv` (one row per
 cluster), `.svg` (plan + side-view map; hover a dot for its cluster/boxel),
-and `<sector>_candidates_clustered.csv` (every candidate with its region,
-cluster, boxel position and anchor system). In the GUI this is the "Survey
+and `<sector>_candidates_clustered.csv` (every candidate with its
+`survey_region`, cluster, boxel position and anchor system). The candidates
+CSV also carries the plain candidate list's `edsm_status`, `direction` and
+`family` columns, so tools built for those lists, such as Expedition
+Tracker's sector-survey mode, can load it directly. The survey-region column
+is `survey_region` (not `region`, as in v1.5.x) so it doesn't collide with
+the galactic-region column such tools add. In the GUI this is the "Survey
 clusters" stage, run per sector on that session's EDSM-validated candidates
 (skipped on dry runs, which have none); cluster/region sizes and the
 survey start are under Parameters.
