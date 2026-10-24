@@ -395,7 +395,11 @@ nearest the "Plot to" system. Every candidate at a stop shares one estimated
 position, so they're listed together, bracketed gaps first, then
 extrapolated candidates nearest their known edge first. The number survives
 filtering and re-sorting in a spreadsheet, and skipping candidates that turn
-out not to exist rarely makes the next leg much longer. On Hypiae Aim this
+out not to exist rarely makes the next leg much longer. `region_visit`
+restarts at 1 in each region, for when you fly regions as separate sessions
+or in a different order (e.g. by carrier): filter to one region and it reads
+against that region's candidate count in the report. `visit_order` stays
+global so it's unique and sorts the whole file on its own. On Hypiae Aim this
 routing cuts in-cluster travel by about 39% versus listing boxels
 alphabetically.
 

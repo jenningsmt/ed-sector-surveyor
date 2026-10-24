@@ -536,8 +536,17 @@ def run(
                 "boxel_known_count": 0,
             })
 
+    # region_visit restarts in each region (regions are often flown as
+    # separate carrier-hop sessions, in any order); visit_order stays global
+    # so it's unique and sorts the whole file on its own.
+    region_count: Counter = Counter()
+    for row in cand_out:
+        if row["region"]:
+            region_count[row["region"]] += 1
+            row["region_visit"] = region_count[row["region"]]
+
     cand_fields = [
-        "visit_order", "region", "cluster", "cluster_stop", "boxel_id", "system_name",
+        "visit_order", "region", "region_visit", "cluster", "cluster_stop", "boxel_id", "system_name",
         "candidate_type", "steps_from_edge",
         "subsector", "mass_code", "mass_prefix", "number", "boxel_known_count",
         "boxel_x", "boxel_y", "boxel_z", "cube_min_x", "cube_min_y", "cube_min_z",
@@ -626,7 +635,10 @@ def _write_report(path, label, db_path, rows, boxels, unplaced, unplaced_candida
             "**Plot to** is a known system near the cluster centre to set as a route destination.\n\n"
         )
         f.write(
-            f"**How to fly it:** work through `{candidates_csv.name}` in `visit_order`. Within each "
+            f"**How to fly it:** work through `{candidates_csv.name}` in `visit_order`. Flying "
+            "regions in a different order (e.g. by carrier)? Filter to one region and use "
+            "`region_visit`, which restarts at 1 in each region (it reads against that region's "
+            "Candidates count below). Within each "
             "cluster, plot to its *Plot to* system, then visit its stops (`cluster_stop`) in order; "
             "every candidate at a stop shares one estimated position, strongest evidence (bracketed "
             "gaps) first. Skip any candidate that turns out not to exist — the next stop is still "

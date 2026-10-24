@@ -197,6 +197,14 @@ class RunTest(unittest.TestCase):
         ordered = [r for r in rows if r["visit_order"]]
         self.assertEqual([int(r["visit_order"]) for r in ordered], list(range(1, len(ordered) + 1)))
         self.assertEqual(rows[-1]["system_name"], f"{self.SECTOR} QQ-Q b1-0")  # unplaced, last
+        self.assertEqual(rows[-1]["region_visit"], "")
+        # region_visit restarts at 1 in each region and counts up with visit_order.
+        by_region = {}
+        for r in ordered:
+            by_region.setdefault(r["region"], []).append(int(r["region_visit"]))
+        self.assertGreater(len(by_region), 1)
+        for counts in by_region.values():
+            self.assertEqual(counts, list(range(1, len(counts) + 1)))
         # The near cluster starts at AB-C c3, the boxel holding its anchor;
         # bracketed gaps first, then backward nearest the known edge first.
         first_cluster = [r for r in ordered if r["cluster"] == "R01-C01"]
