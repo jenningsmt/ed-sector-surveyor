@@ -157,6 +157,7 @@ class App:
         self.max_forward_step_var = tk.StringVar(value=str(self.config.get("max_forward_step", 5)))
         self.cluster_ly_var = tk.StringVar(value=str(self.config.get("cluster_ly", 150)))
         self.cluster_region_ly_var = tk.StringVar(value=str(self.config.get("cluster_region_ly", 450)))
+        self.cluster_start_var = tk.StringVar(value=str(self.config.get("cluster_start", "")))
         self.dry_run_var = tk.BooleanVar(value=self.config.get("dry_run", True))
 
         grid = ttk.Frame(params_frame)
@@ -171,6 +172,14 @@ class App:
         ttk.Entry(grid, textvariable=self.cluster_ly_var, width=8).grid(row=3, column=1, sticky="w")
         ttk.Label(grid, text="Survey region size (ly):").grid(row=4, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.cluster_region_ly_var, width=8).grid(row=4, column=1, sticky="w")
+        ttk.Label(grid, text="Survey start:").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.cluster_start_var, width=40).grid(row=5, column=1, sticky="w")
+        ttk.Label(
+            grid,
+            text="System name (any extracted sector) or x, y, z. Blank: Sol in Gap mode, "
+                 "the center system in Spatial mode.",
+            wraplength=560, justify="left", foreground="#666666",
+        ).grid(row=6, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(
             params_frame,
             text="Dry run (skip EDSM validation -- check candidate volume first)",
@@ -297,6 +306,7 @@ class App:
             self.cluster_region_ly_var.set(str(region_ly))
         self.config["cluster_ly"] = cluster_ly
         self.config["cluster_region_ly"] = region_ly
+        self.config["cluster_start"] = self.cluster_start_var.get().strip()
         self.config["dry_run"] = bool(self.dry_run_var.get())
         self.config["stages"] = {key: var.get() for key, var in self.stage_vars.items()}
         return self.config

@@ -11,7 +11,7 @@
 ; Bump this together with version_info.txt's filevers/prodvers/FileVersion/
 ; ProductVersion and gui/config.py's APP_VERSION when cutting a new release.
 #define MyAppName "ED Sector Surveyor"
-#define MyAppVersion "1.5.1"
+#define MyAppVersion "1.6.0"
 #define MyAppExeName "EDSectorSurveyor.exe"
 
 [Setup]

@@ -386,8 +386,27 @@ survey:
 Both levels are cuts of one complete-linkage tree, so clusters always nest
 inside regions. Regions, and clusters within each region, are numbered in a
 suggested visiting order (nearest-neighbour + 2-opt) starting from the region
-nearest Sol, or `--start-system`. Each cluster names a known system near its
-centre ("Plot to") to use as a galaxy-map route destination.
+nearest the survey start. Each cluster names a known system near its centre
+("Plot to") to use as a galaxy-map route destination.
+
+**Fly the candidates CSV in `visit_order`.** Inside each cluster the stops
+(`cluster_stop`) are its boxels, routed the same way starting from the boxel
+nearest the "Plot to" system. Every candidate at a stop shares one estimated
+position, so they're listed together, bracketed gaps first, then
+extrapolated candidates nearest their known edge first. The number survives
+filtering and re-sorting in a spreadsheet, and skipping candidates that turn
+out not to exist rarely makes the next leg much longer. On Hypiae Aim this
+routing cuts in-cluster travel by about 39% versus listing boxels
+alphabetically.
+
+**Survey start** (`--start-system`, or the GUI's "Survey start" field):
+where the visiting order begins. Accepts a system name from *any* extracted
+sector (useful when your carrier or colony is outside the sector you're
+surveying), `x, y, z` coordinates for anywhere else (EDSM and Spansh both
+show them), or `Sol`. Left blank it's Sol in Gap mode and the center system
+in Spatial mode. The GUI checks it before the EDSM stages start, so a typo
+fails in seconds rather than after a long run. It only changes which region
+comes first and how the rest are sequenced, not the clusters themselves.
 
 Grouping on the bare subsector letters would be wrong: the same letters
 recur for every mass code, hundreds of light years apart.
@@ -404,8 +423,8 @@ cluster), `.svg` (plan + side-view map; hover a dot for its cluster/boxel),
 and `<sector>_candidates_clustered.csv` (every candidate with its region,
 cluster, boxel position and anchor system). In the GUI this is the "Survey
 clusters" stage, run per sector on that session's EDSM-validated candidates
-(skipped on dry runs, which have none); cluster/region sizes are under
-Parameters.
+(skipped on dry runs, which have none); cluster/region sizes and the
+survey start are under Parameters.
 
 ## Dependencies
 

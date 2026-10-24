@@ -289,6 +289,16 @@ def _run_gap_pipeline(
         print("Cancelled before gap analysis stages.")
         return 130
 
+    # Resolve the survey start now (after extraction, so newly extracted
+    # sectors count) rather than after hours of EDSM validation.
+    cluster_start = None
+    if stages.get("cluster", True):
+        try:
+            cluster_start = _resolve_cluster_start(config, project_dir)
+        except gap_cluster_export.StartNotFoundError as exc:
+            print(f"Survey start: {exc}")
+            return 1
+
     # -------------------------------------------------------------------
     # Per-sector: bracketed gaps + backward/forward extrapolation
     # -------------------------------------------------------------------
@@ -392,7 +402,7 @@ def _run_gap_pipeline(
                 return 130
             if sector_files[sector]:
                 _run_clustering(config, sector_db_path(project_dir, sector), sector,
-                                sector_files[sector], out_dir, dry_run)
+                                sector_files[sector], out_dir, dry_run, start=cluster_start)
 
     print("\n=== Pipeline complete ===")
     return 0
@@ -426,6 +436,19 @@ def _run_aggregation(
     aggregate_gap_master_list.write_master_md(md_path, rows, scope_lines=scope_lines)
 
 
+def _resolve_cluster_start(
+    config: dict[str, Any], project_dir: Path
+) -> Optional[tuple[tuple[float, float, float], str]]:
+    """The "Survey start" setting as (position, label), looked up across every
+    extracted sector; None if blank (the caller's default applies). Raises
+    gap_cluster_export.StartNotFoundError if it can't be located."""
+    text = str(config.get("cluster_start") or "").strip()
+    if not text:
+        return None
+    library = project_dir / "data" / "sector_library"
+    return gap_cluster_export.resolve_start(text, sorted(library.glob("sector_*.sqlite")))
+
+
 def _run_clustering(
     config: dict[str, Any],
     db_path: Path,
@@ -434,6 +457,7 @@ def _run_clustering(
     out_dir: Path,
     dry_run: bool,
     label: Optional[str] = None,
+    start: Optional[tuple[tuple[float, float, float], str]] = None,
 ) -> None:
     print(f">>> Stage: survey clusters ({label or sector})")
     if dry_run:
@@ -448,6 +472,8 @@ def _run_clustering(
             region_ly=float(config.get("cluster_region_ly", gap_cluster_export.DEFAULT_REGION_LY)),
             cluster_ly=float(config.get("cluster_ly", gap_cluster_export.DEFAULT_CLUSTER_LY)),
             label=label,
+            start_point=start[0] if start else None,
+            start_label=start[1] if start else None,
         )
     except Exception as exc:
         print(f"  SKIP survey clusters for {label or sector!r}: {exc}")
@@ -500,6 +526,23 @@ def _run_spatial_pipeline(
             f"mode, add {sector!r}, and run extraction)."
         )
         return 1
+
+    # Survey start: the setting if given, otherwise the center system itself.
+    cluster_start = None
+    if stages.get("cluster", True):
+        try:
+            cluster_start = _resolve_cluster_start(config, project_dir)
+            if cluster_start is None:
+                conn = sqlite3.connect(str(db_path))
+                try:
+                    name, cx, cy, cz = gap_spatial_export.resolve_center(conn, center_system)
+                finally:
+                    conn.close()
+                cluster_start = ((cx, cy, cz), name)
+        except (gap_cluster_export.StartNotFoundError,
+                gap_spatial_export.CenterSystemNotFoundError) as exc:
+            print(f"Survey start: {exc}")
+            return 1
 
     print("=== ED Sector Surveyor pipeline: spatial search ===")
     print(f"  Project dir   : {project_dir}")
@@ -554,7 +597,7 @@ def _run_spatial_pipeline(
 
     if stages.get("cluster", True) and session_files:
         _run_clustering(config, db_path, sector, session_files, out_dir, dry_run,
-                        label=f"{sector} spatial {center_system}")
+                        label=f"{sector} spatial {center_system}", start=cluster_start)
 
     print("\n=== Pipeline complete ===")
     return 0

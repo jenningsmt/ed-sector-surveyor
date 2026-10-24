@@ -25,7 +25,7 @@ _OLD_APP_NAMES = ["SectorSurveyor", "SectorGapAnalyzer"]
 # Displayed in the window title. Keep in sync with installer.iss's
 # MyAppVersion and version_info.txt's filevers/prodvers/FileVersion/
 # ProductVersion when cutting a new release.
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.6.0"
 
 
 def _default_workspace_dir() -> str:
@@ -56,6 +56,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_forward_step": 5,
     "cluster_ly": 150,  # max survey-cluster diameter (see scripts/gap_cluster_export.py)
     "cluster_region_ly": 450,  # max survey-region diameter
+    "cluster_start": "",  # survey start: system name or "x, y, z"; blank = Sol (Gap) / center system (Spatial)
     "dry_run": True,
     "stages": {
         "extract": True,

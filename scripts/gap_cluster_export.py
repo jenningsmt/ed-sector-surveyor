@@ -16,7 +16,11 @@ planning:
 Both levels come from the same complete-linkage tree, so clusters always nest
 inside regions. Regions, then clusters within each region, are numbered in a
 suggested visiting order (greedy nearest-neighbour + 2-opt, starting from the
-region nearest --start-system, or Sol).
+region nearest --start-system, or Sol). Inside each cluster the boxels are the
+stops, routed the same way from the boxel nearest the cluster's "plot to"
+anchor; candidates at a stop list bracketed gaps first, then extrapolated
+ones nearest their known edge. Every candidate gets a visit_order number, so
+the route survives filtering and re-sorting in a spreadsheet.
 
 Grouping on bare subsector letters ("AS-S") would be wrong: the same letters
 recur for every mass code, hundreds of ly apart.
@@ -68,6 +72,13 @@ CUBE_SIZE = {"a": 10, "b": 20, "c": 40, "d": 80, "e": 160, "f": 320, "g": 640, "
 GALACTIC_GRID_ORIGIN = (-49985.0, -40985.0, -24105.0)
 # Known-system coordinates are stored to 1/32 ly.
 COORD_TOLERANCE = 0.05
+# Row order within a boxel: strongest evidence first.
+CANDIDATE_RANK = {
+    "bracketed_gap": 0, "spatial_gap": 0,
+    "backward_extrap": 1, "spatial_backward_extrap": 1,
+    "forward_extrap": 2,
+}
+_COORDS_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$")
 
 Point = tuple[float, float, float]
 BoxelKey = tuple[str, str]  # (family lower-cased, mass prefix e.g. "c17")
@@ -75,6 +86,47 @@ BoxelKey = tuple[str, str]  # (family lower-cased, mass prefix e.g. "c17")
 
 class NoCandidatesError(RuntimeError):
     """Raised by run() when the given files hold no not_in_edsm candidates."""
+
+
+class StartNotFoundError(ValueError):
+    """Raised by resolve_start() when a start system can't be located."""
+
+
+def resolve_start(text: str, search_dbs: list[Path]) -> tuple[Point, str]:
+    """Where to start the visiting order: "x, y, z" coordinates, "Sol", or a
+    system name looked up in search_dbs (any extracted sectors, not just the
+    one being surveyed -- a carrier or colony is often elsewhere). Exact
+    names are checked in every DB; a case-insensitive match is also tried in
+    the DB for the name's own sector. Returns (position, label)."""
+    text = text.strip()
+    m = _COORDS_RE.match(text)
+    if m:
+        point = (float(m.group(1)), float(m.group(2)), float(m.group(3)))
+        return point, _xyz(point)
+    if text.lower() == "sol":
+        return (0.0, 0.0, 0.0), "Sol"
+
+    dbs = list(dict.fromkeys(p.resolve() for p in search_dbs if p.is_file()))
+    tokens = text.split()
+    idx = gap_naming.find_subsector_index(tokens)
+    sector_key = re.sub(r"[^a-z0-9]", "", "sector" + " ".join(tokens[:idx]).lower()) if idx else None
+    for exact in (True, False):
+        for db in dbs:
+            if not exact and re.sub(r"[^a-z0-9]", "", db.stem.lower()) != sector_key:
+                continue
+            conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+            try:
+                sql = ("SELECT name, x, y, z FROM systems WHERE name = ?" if exact else
+                       "SELECT name, x, y, z FROM systems WHERE LOWER(name) = LOWER(?)")
+                hit = conn.execute(sql, (text,)).fetchone()
+            finally:
+                conn.close()
+            if hit and None not in hit[1:]:
+                return (float(hit[1]), float(hit[2]), float(hit[3])), hit[0]
+    raise StartNotFoundError(
+        f"Start system {text!r} isn't in any extracted sector. Enter its coordinates "
+        "instead as x, y, z (EDSM and Spansh both show them)."
+    )
 
 
 # =============================================================================
@@ -400,12 +452,25 @@ def run(
     # --- per-boxel and per-cluster details ---
     boxel_cluster = {i: c for c, idxs in enumerate(clusters) for i in idxs}
 
-    def anchor(keys: list[BoxelKey], target: Point) -> tuple[str, float]:
+    def anchor(keys: list[BoxelKey], target: Point) -> tuple[str, Optional[Point]]:
         mates = [m for k in keys for m in known.get(k, ())]
         if not mates:
-            return "", 0.0
-        name, pos = min(mates, key=lambda m: math.dist(m[1], target))
-        return name, math.dist(pos, target)
+            return "", None
+        return min(mates, key=lambda m: math.dist(m[1], target))
+
+    # --- route through each cluster's boxels: start at the boxel nearest the
+    #     cluster's "plot to" anchor, then nearest-neighbour + 2-opt. Every
+    #     candidate in a boxel shares one estimated position, so boxels (not
+    #     candidates) are the stops. ---
+    boxel_stops: dict[int, list[int]] = {}
+    cluster_anchor: dict[int, tuple[str, Optional[Point]]] = {}
+    for c in ordered_clusters:
+        idxs = clusters[c]
+        cluster_anchor[c] = anchor([boxels[i] for i in idxs], cluster_cen[c])
+        entry_point = cluster_anchor[c][1] or cluster_cen[c]
+        pts = [positions[i] for i in idxs]
+        first_stop = min(range(len(idxs)), key=lambda k: math.dist(pts[k], entry_point))
+        boxel_stops[c] = [idxs[k] for k in visiting_order(pts, first_stop)]
 
     def cube(key: BoxelKey, subsector: str) -> tuple[str, str, str, str]:
         grid = boxel_grid_index(subsector, key[1]) if origin else None
@@ -421,33 +486,48 @@ def run(
     report_md = out_dir / f"{stem}_survey_clusters.md"
     map_svg = out_dir / f"{stem}_survey_clusters.svg"
 
+    def _int(v) -> int:
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    def evidence_order(row) -> tuple:
+        # Within a boxel: bracketed gaps (strongest evidence) first, then
+        # extrapolated candidates nearest their known edge first.
+        return (CANDIDATE_RANK.get(row.candidate_type, 9), _int(row.steps_from_edge), _int(row.number))
+
     cand_out = []
-    for i, key in enumerate(boxels):
-        c = boxel_cluster[i]
-        pos = positions[i]
-        boxel_rows = by_boxel[key]
-        cube_x, cube_y, cube_z, cube_size = cube(key, boxel_rows[0].subsector)
-        anchor_name, _ = anchor([key], pos)
-        for row in boxel_rows:
-            cand_out.append({
-                "region": region_name[region_of_cluster[c]],
-                "cluster": cluster_name[c],
-                "boxel_id": f"{row.subsector} {key[1]}",
-                "system_name": row.system_name,
-                "candidate_type": row.candidate_type,
-                "steps_from_edge": row.steps_from_edge,
-                "subsector": row.subsector,
-                "mass_code": row.mass_code,
-                "mass_prefix": key[1],
-                "number": row.number,
-                "boxel_known_count": len(known.get(key, ())),
-                "boxel_x": f"{pos[0]:.1f}", "boxel_y": f"{pos[1]:.1f}", "boxel_z": f"{pos[2]:.1f}",
-                "cube_min_x": cube_x, "cube_min_y": cube_y, "cube_min_z": cube_z,
-                "cube_size_ly": cube_size,
-                "anchor_known_system": anchor_name,
-            })
+    for c in ordered_clusters:
+        for stop, i in enumerate(boxel_stops[c], 1):
+            key = boxels[i]
+            pos = positions[i]
+            boxel_rows = sorted(by_boxel[key], key=evidence_order)
+            cube_x, cube_y, cube_z, cube_size = cube(key, boxel_rows[0].subsector)
+            anchor_name, _ = anchor([key], pos)
+            for row in boxel_rows:
+                cand_out.append({
+                    "visit_order": len(cand_out) + 1,
+                    "region": region_name[region_of_cluster[c]],
+                    "cluster": cluster_name[c],
+                    "cluster_stop": stop,
+                    "boxel_id": f"{row.subsector} {key[1]}",
+                    "system_name": row.system_name,
+                    "candidate_type": row.candidate_type,
+                    "steps_from_edge": row.steps_from_edge,
+                    "subsector": row.subsector,
+                    "mass_code": row.mass_code,
+                    "mass_prefix": key[1],
+                    "number": row.number,
+                    "boxel_known_count": len(known.get(key, ())),
+                    "boxel_x": f"{pos[0]:.1f}", "boxel_y": f"{pos[1]:.1f}", "boxel_z": f"{pos[2]:.1f}",
+                    "cube_min_x": cube_x, "cube_min_y": cube_y, "cube_min_z": cube_z,
+                    "cube_size_ly": cube_size,
+                    "anchor_known_system": anchor_name,
+                })
+    # Unlocatable boxels go last, with no visit_order.
     for key in unplaced:
-        for row in by_boxel[key]:
+        for row in sorted(by_boxel[key], key=evidence_order):
             cand_out.append({
                 "region": "", "cluster": "", "boxel_id": f"{row.subsector} {key[1]}",
                 "system_name": row.system_name, "candidate_type": row.candidate_type,
@@ -456,15 +536,9 @@ def run(
                 "boxel_known_count": 0,
             })
 
-    def _int(v) -> int:
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return 0
-
-    cand_out.sort(key=lambda r: (r["cluster"] == "", r["cluster"], r["boxel_id"], _int(r["number"])))
     cand_fields = [
-        "region", "cluster", "boxel_id", "system_name", "candidate_type", "steps_from_edge",
+        "visit_order", "region", "cluster", "cluster_stop", "boxel_id", "system_name",
+        "candidate_type", "steps_from_edge",
         "subsector", "mass_code", "mass_prefix", "number", "boxel_known_count",
         "boxel_x", "boxel_y", "boxel_z", "cube_min_x", "cube_min_y", "cube_min_z",
         "cube_size_ly", "anchor_known_system",
@@ -475,15 +549,20 @@ def run(
         writer.writerows(cand_out)
 
     cluster_rows = []
+    first_visit = {}
+    for row in cand_out:
+        first_visit.setdefault(row["cluster"], row.get("visit_order", ""))
     for c in ordered_clusters:
-        keys = [boxels[i] for i in clusters[c]]
+        keys = [boxels[i] for i in boxel_stops[c]]
         crows = [r for k in keys for r in by_boxel[k]]
         cen = cluster_cen[c]
-        anchor_name, anchor_dist = anchor(keys, cen)
+        anchor_name, anchor_pos = cluster_anchor[c]
+        anchor_dist = math.dist(anchor_pos, cen) if anchor_pos else 0.0
         types = Counter(r.candidate_type for r in crows)
         cluster_rows.append({
             "cluster": cluster_name[c],
             "region": region_name[region_of_cluster[c]],
+            "first_visit_order": first_visit[cluster_name[c]],
             "centroid_x": f"{cen[0]:.1f}", "centroid_y": f"{cen[1]:.1f}", "centroid_z": f"{cen[2]:.1f}",
             "diameter_ly": f"{_diameter(cluster_points[c]):.1f}",
             "boxels": len(keys),
@@ -493,7 +572,7 @@ def run(
             "mass_codes": " ".join(f"{m}:{n}" for m, n in sorted(Counter(k[1][0] for k in keys).items())),
             "anchor_known_system": anchor_name,
             "anchor_dist_ly": f"{anchor_dist:.1f}",
-            "boxel_ids": "; ".join(sorted(f"{by_boxel[k][0].subsector} {k[1]}" for k in keys)),
+            "boxel_ids_in_route_order": "; ".join(f"{by_boxel[k][0].subsector} {k[1]}" for k in keys),
         })
     with clusters_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, list(cluster_rows[0]))
@@ -545,6 +624,13 @@ def _write_report(path, label, db_path, rows, boxels, unplaced, unplaced_candida
             "positions. An undiscovered system can sit anywhere in its boxel's cube "
             "(edge: b 20 ly, c 40 ly, d 80 ly, e 160 ly), so treat cluster outlines as approximate. "
             "**Plot to** is a known system near the cluster centre to set as a route destination.\n\n"
+        )
+        f.write(
+            f"**How to fly it:** work through `{candidates_csv.name}` in `visit_order`. Within each "
+            "cluster, plot to its *Plot to* system, then visit its stops (`cluster_stop`) in order; "
+            "every candidate at a stop shares one estimated position, strongest evidence (bracketed "
+            "gaps) first. Skip any candidate that turns out not to exist — the next stop is still "
+            "nearby.\n\n"
         )
         if origin is None:
             f.write("> Boxel cubes could not be decoded for this sector (its names don't follow the "
@@ -676,7 +762,8 @@ def main() -> int:
     parser.add_argument("--cluster-ly", type=float, default=DEFAULT_CLUSTER_LY,
                         help=f"Max cluster diameter, ly (default: {DEFAULT_CLUSTER_LY:g})")
     parser.add_argument("--start-system", default=None,
-                        help="Known system in --db to start the visiting order from (default: nearest Sol)")
+                        help="Where to start the visiting order: a system in --db or any other "
+                             "sector_*.sqlite beside it, or 'x, y, z' coordinates (default: Sol)")
     args = parser.parse_args()
 
     if not args.db.exists():
@@ -686,24 +773,20 @@ def main() -> int:
         print("ERROR: need 0 < --cluster-ly <= --region-ly", file=sys.stderr)
         return 1
 
-    start_point = None
+    start_point, start_label = None, None
     if args.start_system:
-        conn = sqlite3.connect(str(args.db))
         try:
-            hit = conn.execute(
-                "SELECT x, y, z FROM systems WHERE LOWER(name) = LOWER(?)", (args.start_system.strip(),)
-            ).fetchone()
-        finally:
-            conn.close()
-        if hit is None:
-            print(f"ERROR: start system not found in {args.db.name}: {args.start_system!r}", file=sys.stderr)
+            start_point, start_label = resolve_start(
+                args.start_system, [args.db, *sorted(args.db.parent.glob("sector_*.sqlite"))]
+            )
+        except StartNotFoundError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
             return 1
-        start_point = (float(hit[0]), float(hit[1]), float(hit[2]))
 
     try:
         run(args.db, args.sector, args.files, args.out_dir,
             region_ly=args.region_ly, cluster_ly=args.cluster_ly, start_point=start_point,
-            start_label=args.start_system.strip() if args.start_system else None)
+            start_label=start_label)
     except NoCandidatesError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

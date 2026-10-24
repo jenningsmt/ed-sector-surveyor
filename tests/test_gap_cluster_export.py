@@ -178,12 +178,75 @@ class RunTest(unittest.TestCase):
         self.assertEqual(rows[name("QQ-Q b1-0")]["cluster"], "")
         self.assertEqual(rows[name("AB-C c3-5")]["anchor_known_system"][:len(self.SECTOR)], self.SECTOR)
 
+    def test_visit_order_routes_boxels_and_ranks_evidence(self):
+        backward = self.out_dir / "testa_aim_extrap_backward_validated.csv"
+        with backward.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, ["system_name", "edsm_status", "steps_from_edge", "family",
+                                        "subsector", "mass_prefix", "mass_code", "boxel", "number"])
+            writer.writeheader()
+            for num, steps in ((0, 2), (1, 1)):
+                writer.writerow({"system_name": f"{self.SECTOR} AB-C c3-{num}", "edsm_status": "not_in_edsm",
+                                 "steps_from_edge": steps, "family": f"{self.SECTOR} AB-C",
+                                 "subsector": "AB-C", "mass_prefix": "c3", "mass_code": "c",
+                                 "boxel": 3, "number": num})
+        with contextlib.redirect_stdout(io.StringIO()):
+            gce.run(self.db, self.SECTOR, [self.candidates, backward], self.out_dir)
+        with (self.out_dir / "testa_aim_candidates_clustered.csv").open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+        ordered = [r for r in rows if r["visit_order"]]
+        self.assertEqual([int(r["visit_order"]) for r in ordered], list(range(1, len(ordered) + 1)))
+        self.assertEqual(rows[-1]["system_name"], f"{self.SECTOR} QQ-Q b1-0")  # unplaced, last
+        # The near cluster starts at AB-C c3, the boxel holding its anchor;
+        # bracketed gaps first, then backward nearest the known edge first.
+        first_cluster = [r for r in ordered if r["cluster"] == "R01-C01"]
+        self.assertEqual([r["system_name"].split()[-1] for r in first_cluster[:4]],
+                         ["c3-5", "c3-6", "c3-1", "c3-0"])
+        self.assertEqual({r["cluster_stop"] for r in first_cluster[:4]}, {"1"})
+        self.assertEqual(first_cluster[4]["boxel_id"], "AD-C c3")
+        self.assertEqual(first_cluster[4]["cluster_stop"], "2")
+
     def test_no_candidates_raises(self):
         empty = self.out_dir / "empty_gap_full_validated.csv"
         empty.write_text("system_name,edsm_status\n", encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(gce.NoCandidatesError):
                 gce.run(self.db, self.SECTOR, [empty], self.out_dir)
+
+
+class ResolveStartTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self._tmp.name)
+        self.dbs = []
+        for sector, name, pos in (("Testa Aim", "Testa Aim AB-C c3-0", (1, 2, 3)),
+                                  ("Other Sector", "Other Sector XY-Z d1-7", (100, 5, -40))):
+            db = tmp / f"sector_{sector.replace(' ', '_')}.sqlite"
+            conn = sqlite3.connect(str(db))
+            conn.execute("CREATE TABLE systems (name TEXT, x REAL, y REAL, z REAL)")
+            conn.execute("INSERT INTO systems VALUES (?, ?, ?, ?)", (name, *pos))
+            conn.commit()
+            conn.close()
+            self.dbs.append(db)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_name_in_another_sector(self):
+        self.assertEqual(gce.resolve_start("Other Sector XY-Z d1-7", self.dbs),
+                         ((100.0, 5.0, -40.0), "Other Sector XY-Z d1-7"))
+
+    def test_case_insensitive_in_own_sector(self):
+        self.assertEqual(gce.resolve_start("other sector xy-z d1-7", self.dbs)[1], "Other Sector XY-Z d1-7")
+
+    def test_coordinates_and_sol(self):
+        self.assertEqual(gce.resolve_start("-7800, 40.5, -5000", [])[0], (-7800.0, 40.5, -5000.0))
+        self.assertEqual(gce.resolve_start("-7800 40.5 -5000", [])[0], (-7800.0, 40.5, -5000.0))
+        self.assertEqual(gce.resolve_start("sol", []), ((0.0, 0.0, 0.0), "Sol"))
+
+    def test_unknown_name_raises(self):
+        with self.assertRaises(gce.StartNotFoundError):
+            gce.resolve_start("Nowhere AB-C d1-1", self.dbs)
 
 
 if __name__ == "__main__":
