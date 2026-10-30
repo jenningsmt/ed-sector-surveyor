@@ -95,8 +95,8 @@ class RetiredSettingsTests(unittest.TestCase):
 
 class StatusWordingTests(unittest.TestCase):
     def test_known_codes_are_described(self):
-        self.assertEqual(describe_exit("0"), "completed (exit 0)")
-        self.assertIn("some stages failed", describe_exit("2"))
+        self.assertEqual(describe_exit("0"), "completed, exit 0")
+        self.assertEqual(describe_exit("2"), "finished with failed stages, exit 2")
         self.assertIn("cancelled", describe_exit("130"))
 
     def test_unknown_code_is_shown_as_is(self):

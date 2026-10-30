@@ -18,17 +18,17 @@ DONE_SENTINEL = "__job_done__"
 # reports 1. The GUI loads a job's results only on 0 (extraction also on 3).
 EXIT_DESCRIPTIONS = {
     "0": "completed",
-    "1": "failed; see the log",
-    "2": "finished, but some stages failed; see the log",
-    "3": "completed, but some input records were unreadable; see the log",
+    "1": "failed",
+    "2": "finished with failed stages",
+    "3": "completed, skipping unreadable input records",
     "130": "cancelled",
 }
 
 
 def describe_exit(returncode: str) -> str:
-    """Status-bar wording for a job's return code."""
+    """Status-bar wording for a job's return code; details are in the log."""
     text = EXIT_DESCRIPTIONS.get(returncode)
-    return f"{text} (exit {returncode})" if text else f"exit {returncode}"
+    return f"{text}, exit {returncode}" if text else f"exit {returncode}"
 
 
 class _QueueWriter:
