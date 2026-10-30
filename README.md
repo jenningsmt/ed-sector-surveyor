@@ -147,14 +147,10 @@ numbers roughly in order, so gaps in the known numbers are informative:
   `--max-bracket-width` (default 25) are skipped — a very wide unbracketed
   stretch is more likely a number Stellar Forge never allocated than a real
   missing system.
-- **Backward extrapolation** (`scripts/gap_extrapolate_export.py --direction
-  backward`) — numbers below a family's known minimum, down toward 0 (e.g.
-  known minimum `d1-5` → candidates `d1-4, d1-3, d1-2, d1-1, d1-0`). Bounded
-  by `--extend-depth` (default 5).
-- **Forward extrapolation** (same script, `--direction forward`) — numbers
-  above a family's known maximum, chain-extended only while EDSM keeps
-  confirming each step. Not currently part of the standard run for this
-  project (see below) but available if needed.
+- **Backward extrapolation** (`scripts/gap_extrapolate_export.py`) — numbers
+  below a family's known minimum, down toward 0 (e.g. known minimum `d1-5` →
+  candidates `d1-4, d1-3, d1-2, d1-1, d1-0`). Bounded by `--extend-depth`
+  (default 5).
 - **Spatial search** (`scripts/gap_spatial_export.py`) — the same bracketed-gap
   and backward-extrapolation logic, but only for the boxels within a chosen
   radius (light years) of a center system instead of an entire sector
@@ -187,7 +183,7 @@ method (bracketed gap, backward, spatial, etc.) found them.
         │                                                   (GUI: automatic right after extraction)
         ▼
 3. Candidate generation + EDSM validation     — scripts/gap_full_export.py            (bracketed gaps, whole sector)
-                                                 scripts/gap_extrapolate_export.py      (backward/forward, whole sector)
+                                                 scripts/gap_extrapolate_export.py      (backward, whole sector)
                                                  scripts/gap_spatial_export.py          (bracketed gaps + backward,
                                                                                           radius around a system)
         │
@@ -245,7 +241,7 @@ python scripts/extract_sector_systems_to_sqlite.py \
     --sector_prefix "Outopps"
 ```
 
-Multiple sectors in one pass (recommended whenever extracting >1 sector):
+Multiple sectors in one pass (recommended whenever extracting more than one sector):
 
 ```bash
 python scripts/extract_multi_sector_to_sqlite.py \
@@ -255,9 +251,24 @@ python scripts/extract_multi_sector_to_sqlite.py \
 
 Both write to `data/sector_library/sector_<slug>.sqlite` by default (three
 tables: `systems`, `bodies`, `rings`, plus a `raw_json` column on each for
-anything not explicitly mapped). Use `--limit N` on either script to sample a
-prefix of the dump first and gauge throughput before committing to a full run
-on very large source files.
+anything not explicitly mapped). Use `--limit N` on either script to scan only
+the first N records of the dump and gauge throughput before committing to a
+full run on very large source files.
+
+A new database is written as `sector_<slug>.sqlite.partial` and renamed when
+the run finishes, so a cancelled or failed extraction never leaves a
+half-written database behind. Extracting into an existing database updates it
+in place (systems are added or replaced, never removed); delete the file first
+for a clean copy of a newer dump.
+
+Unreadable records in the dump are skipped, counted and listed in the summary,
+and the run exits with code 3 instead of 0. Add `--strict` to stop at the first
+one instead. Systems without a complete, valid position are stored with empty
+coordinates and counted, so distance-based searches leave them out.
+
+Exit codes for both scripts and the GUI pipeline: 0 completed, 1 failed,
+2 finished with failed stages (GUI pipeline only), 3 completed but skipped
+unreadable records, 130 cancelled.
 
 Sector-prefix matching requires a token boundary (the prefix must be the
 whole system name or be followed by a space), so `"Oochost"` won't
@@ -288,11 +299,11 @@ python scripts/gap_full_export.py --db data/sector_library/sector_outopps.sqlite
 python scripts/gap_full_export.py --db data/sector_library/sector_outopps.sqlite \
     --sector "Outopps" --out-dir out
 
-# Backward extrapolation only (no forward chaining):
+# Backward extrapolation:
 python scripts/gap_extrapolate_export.py --db data/sector_library/sector_outopps.sqlite \
-    --sector "Outopps" --out-dir out --direction backward --dry-run
+    --sector "Outopps" --out-dir out --dry-run
 python scripts/gap_extrapolate_export.py --db data/sector_library/sector_outopps.sqlite \
-    --sector "Outopps" --out-dir out --direction backward
+    --sector "Outopps" --out-dir out
 ```
 
 Both scripts write CSV + Markdown per phase into `--out-dir` (use the same
@@ -345,7 +356,7 @@ python scripts/aggregate_gap_master_list.py --out-dir out
 ```
 
 Scans `out/` for every sector's `*_gap_full_validated.csv`,
-`*_extrap_backward_validated.csv` / `*_extrap_forward_step*.csv`, and
+`*_extrap_backward_validated.csv`, and
 `*_spatial_gap_validated.csv` / `*_spatial_backward_validated.csv`, keeps
 only rows EDSM has no record of (`edsm_status == not_in_edsm`), tags each
 with its sector and candidate type, and writes one combined
@@ -502,7 +513,7 @@ scripts/
   sector_summary_export.py              Sector baseline summary report (ring/ELW/biosig stats), run after extraction
   gap_naming.py                         Shared procedural-name parsing + sector/subsector/mass-code/boxel/serial sort key
   gap_full_export.py                    Bracketed intra-sequence gap candidates + EDSM validation
-  gap_extrapolate_export.py             Backward/forward extrapolation candidates + EDSM validation
+  gap_extrapolate_export.py             Backward extrapolation candidates + EDSM validation
   gap_spatial_export.py                 Bracketed gaps + backward extrapolation within a radius of a system
   aggregate_gap_master_list.py          Merge per-sector CSVs into one master candidate list
   gap_cluster_export.py                 Group candidates into nested survey regions/clusters by boxel location, with map
@@ -551,7 +562,7 @@ The design doc describes a two-tier methodology with computed confidence
 scores (`density_score`, `bracket_score_norm`, `family_strength_score`, a
 weighted `priority_score`, spatial neighborhood anchoring, etc.). The scripts
 that actually exist today implement a simpler subset: bracketed-gap detection
-with a bracket-width cap, and backward/forward extrapolation gated by EDSM
+with a bracket-width cap, and backward extrapolation gated by EDSM
 confirmation — no computed composite score, no scored spatial-anchoring tier
 (the doc's `density_score`-weighted neighborhood concept). `gap_spatial_export.py`'s
 "spatial search" is a different, later addition: an unscored radius filter on
@@ -570,9 +581,9 @@ write CSVs with a shared schema (see `scripts/gap_naming.py`) so
 |---|---|
 | `system_name` | Candidate system name |
 | `edsm_status` | `not_in_edsm` (kept), `in_edsm` (filtered out), `skipped` (dry-run) |
-| `direction` | `bracketed_gap` or `backward` (or `forward`, sector mode only) |
-| `steps_from_edge` | For backward/forward: distance from the known edge (1 = adjacent) |
-| `spansh_edge_number` | The known min (backward) or max (forward) the candidate extends from |
+| `direction` | `bracketed_gap` or `backward` |
+| `steps_from_edge` | For backward: distance below the known minimum (1 = adjacent) |
+| `spansh_edge_number` | The known minimum the candidate extends below |
 | `family` | Sector + subsector token, e.g. `Outopps FG-Y` |
 | `subsector` | Just the subsector token, e.g. `FG-Y` |
 | `mass_prefix` | The mass-code letter + boxel number, e.g. `d1` |
@@ -597,9 +608,9 @@ Total candidates (not in EDSM): 47
 
 ## Summary
 
-| Sector | Bracketed Gap | Backward Extrap | Forward Extrap | Spatial Gap | Spatial Backward | Total |
-|--------|--------------:|-----------------:|----------------:|------------:|-----------------:|------:|
-| flaming_star_sector | 19 | 28 | 0 | 0 | 0 | 47 |
+| Sector | Bracketed Gap | Backward Extrap | Spatial Gap | Spatial Backward | Total |
+|--------|--------------:|-----------------:|------------:|-----------------:|------:|
+| flaming_star_sector | 19 | 28 | 0 | 0 | 47 |
 
 ## flaming_star_sector
 
