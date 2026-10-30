@@ -14,6 +14,22 @@ from typing import Any, Callable, Optional
 
 DONE_SENTINEL = "__job_done__"
 
+# Job return codes, shared by the pipelines and extractors. A job that raises
+# reports 1. The GUI loads a job's results only on 0 (extraction also on 3).
+EXIT_DESCRIPTIONS = {
+    "0": "completed",
+    "1": "failed; see the log",
+    "2": "finished, but some stages failed; see the log",
+    "3": "completed, but some input records were unreadable; see the log",
+    "130": "cancelled",
+}
+
+
+def describe_exit(returncode: str) -> str:
+    """Status-bar wording for a job's return code."""
+    text = EXIT_DESCRIPTIONS.get(returncode)
+    return f"{text} (exit {returncode})" if text else f"exit {returncode}"
+
 
 class _QueueWriter:
     """File-like object that splits writes on newlines and pushes complete
@@ -124,6 +140,7 @@ class Worker:
         except SystemExit as exc:
             returncode = exc.code
         except Exception:
+            returncode = 1
             error = traceback.format_exc()
         finally:
             writer.flush()

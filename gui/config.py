@@ -52,8 +52,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "spatial_sector_override": "",
     "max_bracket_width": 25,
     "extend_depth": 5,
-    "run_forward": False,
-    "max_forward_step": 5,
     "cluster_ly": 150,  # max survey-cluster diameter (see scripts/gap_cluster_export.py)
     "cluster_region_ly": 450,  # max survey-region diameter
     "cluster_start": "",  # survey start: system name or "x, y, z"; blank = Sol (Gap) / center system (Spatial)
@@ -62,12 +60,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "extract": True,
         "bracketed_gaps": True,
         "backward_extrap": True,
-        "forward_extrap": False,
         "aggregate": True,
         "cluster": True,
         "bio_opportunity": False,
     },
 }
+
+
+# Settings from earlier versions that no longer exist. Dropped on load so a
+# saved forward-extrapolation choice (removed in v1.7.0) can't come back.
+_RETIRED_KEYS = ("run_forward", "max_forward_step")
+_RETIRED_STAGES = ("forward_extrap",)
 
 
 def _appdata_base() -> Path:
@@ -115,6 +118,11 @@ def load_config() -> dict[str, Any]:
                     config["stages"] = {**DEFAULT_CONFIG["stages"], **saved["stages"]}
         except (json.JSONDecodeError, OSError):
             pass
+    for key in _RETIRED_KEYS:
+        config.pop(key, None)
+    if isinstance(config.get("stages"), dict):
+        for key in _RETIRED_STAGES:
+            config["stages"].pop(key, None)
     return config
 
 

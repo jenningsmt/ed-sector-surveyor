@@ -76,14 +76,12 @@ COORD_TOLERANCE = 0.05
 CANDIDATE_RANK = {
     "bracketed_gap": 0, "spatial_gap": 0,
     "backward_extrap": 1, "spatial_backward_extrap": 1,
-    "forward_extrap": 2,
 }
 # The source CSVs' `direction` values, restored so this file carries every
 # column a plain candidate list has (Expedition Tracker relies on them).
 DIRECTION = {
     "bracketed_gap": "bracketed_gap", "spatial_gap": "bracketed_gap",
     "backward_extrap": "backward", "spatial_backward_extrap": "backward",
-    "forward_extrap": "forward",
 }
 _COORDS_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$")
 

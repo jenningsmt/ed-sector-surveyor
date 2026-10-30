@@ -9,6 +9,7 @@ Example usage:
 import argparse
 import gzip
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -41,6 +42,60 @@ DEFAULT_COMMIT_EVERY_BODIES = 100000
 DEFAULT_COMMIT_EVERY_RINGS = 100000
 DEFAULT_PROGRESS_SECONDS = 30
 DEFAULT_PROGRESS_EVERY_SYSTEMS = 50000
+
+# Return codes shared by the extractors (and mirrored by the GUI pipelines).
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_REJECTED_RECORDS = 3  # completed, but some input records were unreadable and skipped
+EXIT_CANCELLED = 130
+
+
+class RejectedRecordError(Exception):
+    """Raised in strict mode at the first unreadable input record."""
+
+
+class InputStats:
+    """Counts input records that could not be used, so a tolerant run can
+    report them instead of skipping them silently."""
+
+    MAX_EXAMPLES = 5
+
+    def __init__(self, strict: bool = False) -> None:
+        self.strict = strict
+        self.rejected = 0
+        self.examples: List[str] = []
+        self.invalid_coords = 0
+
+    def reject(self, where: str, reason: str) -> None:
+        self.rejected += 1
+        if len(self.examples) < self.MAX_EXAMPLES:
+            self.examples.append(f"{where}: {reason}")
+        if self.strict:
+            raise RejectedRecordError(f"{where}: {reason}")
+
+    def report(self) -> None:
+        if self.rejected:
+            print(f"Rejected records: {self.rejected} (unreadable input, skipped)")
+            for example in self.examples:
+                print(f"  {example}")
+        if self.invalid_coords:
+            print(
+                f"Systems without valid coordinates: {self.invalid_coords} "
+                "(stored with empty coordinates; left out of distance searches)"
+            )
+
+
+def staging_path(db_path: Path) -> Path:
+    """Where a fresh extraction is written until it completes."""
+    return db_path.with_name(db_path.name + ".partial")
+
+
+def remove_quietly(path: Path) -> None:
+    for candidate in (path, path.with_name(path.name + "-journal")):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def utc_now_iso() -> str:
@@ -87,6 +142,16 @@ def safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def finite_float(value: Any) -> Optional[float]:
+    """safe_float, but NaN and infinities count as missing."""
+    if isinstance(value, bool):
+        return None
+    result = safe_float(value)
+    if result is None or not math.isfinite(result):
+        return None
+    return result
+
+
 def safe_int(value: Any) -> Optional[int]:
     try:
         return int(value)
@@ -127,18 +192,15 @@ def get_system_address(system: Dict[str, Any]) -> Optional[int]:
 
 
 def get_system_coords(system: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """All three coordinates as finite floats, or (None, None, None) if any
+    is missing or invalid -- a partial position is not a usable position.
+    Zero and negative values are legal."""
     coords = system.get("coords")
-    if isinstance(coords, dict):
-        return (
-            safe_float(coords.get("x")),
-            safe_float(coords.get("y")),
-            safe_float(coords.get("z")),
-        )
-    return (
-        safe_float(system.get("x")),
-        safe_float(system.get("y")),
-        safe_float(system.get("z")),
-    )
+    source = coords if isinstance(coords, dict) else system
+    xyz = tuple(finite_float(source.get(axis)) for axis in ("x", "y", "z"))
+    if any(v is None for v in xyz):
+        return None, None, None
+    return xyz
 
 
 def extract_bodies(system: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -243,21 +305,27 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def iter_systems_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+def iter_systems_jsonl(path: Path, stats: Optional[InputStats] = None) -> Iterable[Dict[str, Any]]:
+    """Yield each line's system object. Unreadable lines and non-object
+    values are counted in `stats` (and raise in strict mode)."""
+    stats = stats if stats is not None else InputStats()
     with open_text(path) as handle:
-        for line in handle:
+        for line_no, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped:
                 continue
             try:
                 obj = json.loads(stripped)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                stats.reject(f"line {line_no}", f"invalid JSON ({exc.msg})")
                 continue
             if isinstance(obj, dict):
                 yield obj
+            else:
+                stats.reject(f"line {line_no}", f"not a JSON object ({type(obj).__name__})")
 
 
-def iter_systems_json_doc(path: Path) -> Iterable[Dict[str, Any]]:
+def iter_systems_json_doc(path: Path, stats: Optional[InputStats] = None) -> Iterable[Dict[str, Any]]:
     try:
         import ijson
     except ImportError as exc:
@@ -267,11 +335,14 @@ def iter_systems_json_doc(path: Path) -> Iterable[Dict[str, Any]]:
     # run can be diagnosed (e.g. a build whose ijson lacked the compiled
     # extension) without needing to inspect the environment directly.
     print(f"Detected JSON array document; streaming via ijson (backend={ijson.backend}).")
+    stats = stats if stats is not None else InputStats()
     opener = gzip.open if path.suffix.lower() == ".gz" else open
     with opener(path, "rb") as handle:
-        for obj in ijson.items(handle, "item"):
+        for item_no, obj in enumerate(ijson.items(handle, "item"), start=1):
             if isinstance(obj, dict):
                 yield obj
+            else:
+                stats.reject(f"item {item_no}", f"not a JSON object ({type(obj).__name__})")
 
 
 def sanitize_prefix(prefix: str) -> str:
@@ -362,11 +433,13 @@ def process_system(
         )
 
         for ring in extract_rings(body):
+            # Spansh dumps use type/mass/innerRadius/outerRadius; the other
+            # spellings are journal-style aliases.
             ring_name = string_value(first_value(ring, ["name", "Name", "ringName", "RingName"]))
-            ring_class = normalize_ring_class(first_value(ring, ["ringClass", "RingClass", "class"]))
-            mass_mt = safe_float(first_value(ring, ["massMT", "MassMT"]))
-            inner_rad = safe_float(first_value(ring, ["innerRad", "InnerRad"]))
-            outer_rad = safe_float(first_value(ring, ["outerRad", "OuterRad"]))
+            ring_class = normalize_ring_class(first_value(ring, ["type", "ringClass", "RingClass", "class"]))
+            mass_mt = safe_float(first_value(ring, ["mass", "massMT", "MassMT"]))
+            inner_rad = safe_float(first_value(ring, ["innerRadius", "innerRad", "InnerRad"]))
+            outer_rad = safe_float(first_value(ring, ["outerRadius", "outerRad", "OuterRad"]))
             reserve_level = string_value(first_value(ring, ["reserveLevel", "ReserveLevel"]))
             if not ring_name:
                 ring_name = synth_ring_name(body_name, ring_class, inner_rad, outer_rad)
@@ -515,11 +588,24 @@ def run(
     progress_seconds: int = DEFAULT_PROGRESS_SECONDS,
     progress_every_systems: int = DEFAULT_PROGRESS_EVERY_SYSTEMS,
     cancel_event: Optional[threading.Event] = None,
+    strict: bool = False,
 ) -> int:
     """Extract one sector's systems/bodies/rings into a SQLite DB.
 
-    Return codes: 0 = success, 1 = input/format error, 130 = interrupted
-    (KeyboardInterrupt or cancel_event set).
+    A new database is built under a ".partial" name and renamed into place
+    only when the run completes, so a cancelled or failed run never leaves a
+    half-written database under the normal name. Extracting into an existing
+    database merges into it (rows are inserted or replaced; nothing is
+    removed), as before.
+
+    `limit` caps the number of input records scanned. In strict mode the run
+    stops at the first unreadable record; otherwise such records are skipped,
+    counted and reported.
+
+    Return codes: EXIT_OK (0); EXIT_FAILED (1) for input/format errors, write
+    failures and strict-mode rejections; EXIT_REJECTED_RECORDS (3) when the
+    run completed but skipped unreadable records; EXIT_CANCELLED (130) when
+    interrupted (KeyboardInterrupt or cancel_event set).
     """
     sector_prefix = sector_prefix.rstrip("\r\n")
 
@@ -537,9 +623,14 @@ def run(
     parsed_format = detect_format(input_path)
     if parsed_format == "unknown":
         print("Unable to detect galaxy.json format (jsonl vs json document).")
-        return 1
+        return EXIT_FAILED
 
-    conn = sqlite3.connect(db_path)
+    stats = InputStats(strict=strict)
+    fresh = not db_path.exists()
+    write_path = staging_path(db_path) if fresh else db_path
+    if fresh:
+        remove_quietly(write_path)  # leftover from an earlier failed run
+    conn = sqlite3.connect(write_path)
     try:
         init_db(conn)
     except Exception:
@@ -610,11 +701,12 @@ def run(
     debug_names_seen = 0
     debug_match_seen = 0
     interrupted = False
+    failure: Optional[str] = None
     try:
         if parsed_format == "jsonl":
-            iterator = iter_systems_jsonl(input_path)
+            iterator = iter_systems_jsonl(input_path, stats)
         else:
-            iterator = iter_systems_json_doc(input_path)
+            iterator = iter_systems_json_doc(input_path, stats)
 
         for system in iterator:
             if cancel_event is not None and cancel_event.is_set():
@@ -622,9 +714,9 @@ def run(
                 print("Cancelled by user; flushing pending data...", flush=True)
                 break
 
-            systems_scanned += 1
             if limit is not None and systems_scanned >= limit:
                 break
+            systems_scanned += 1
 
             if not isinstance(system, dict):
                 print_progress()
@@ -652,6 +744,8 @@ def run(
 
             matched_systems += 1
             systems_with_rings += 1 if ring_list else 0
+            if system_row["x"] is None:
+                stats.invalid_coords += 1
             system_rows.append(system_row)
             body_rows.extend(body_list)
             ring_rows.extend(ring_list)
@@ -683,6 +777,14 @@ def run(
             flush()
         except Exception:
             conn.rollback()
+    except RejectedRecordError as exc:
+        failure = f"Stopped at the first unreadable record (strict mode): {exc}"
+    except Exception as exc:
+        failure = f"Extraction failed: {type(exc).__name__}: {exc}"
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
     finally:
         conn.close()
 
@@ -697,10 +799,23 @@ def run(
     print(f"Systems with >=1 ring: {systems_with_rings}")
     print(f"Elapsed minutes: {elapsed_minutes:.2f}")
     print(f"Average rate: {rate:.2f} systems/sec")
+    stats.report()
+
+    if failure or interrupted:
+        if fresh:
+            remove_quietly(write_path)
+            print(f"No database written: {db_path} was not created.")
+        else:
+            print(f"Existing database kept: {db_path} (it may hold part of this run's updates).")
+        if failure:
+            print(failure)
+            return EXIT_FAILED
+        return EXIT_CANCELLED
+
+    if fresh:
+        os.replace(write_path, db_path)
     print(f"Database written to: {db_path}")
-    if interrupted:
-        return 130
-    return 0
+    return EXIT_REJECTED_RECORDS if stats.rejected else EXIT_OK
 
 
 def main() -> int:
@@ -712,7 +827,11 @@ def main() -> int:
     parser.add_argument("--sector_prefix", default=None)
     parser.add_argument("--case_insensitive", action="store_true")
     parser.add_argument("--case_sensitive", action="store_true")
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--limit", type=int, default=None, help="Stop after scanning this many input records")
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="Stop at the first unreadable input record instead of skipping and reporting it",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--debug_prefix", action="store_true")
     parser.add_argument("--stop_after_matches", type=int, default=0)
@@ -752,6 +871,7 @@ def main() -> int:
         commit_every_rings=args.commit_every_rings,
         progress_seconds=args.progress_seconds,
         progress_every_systems=args.progress_every_systems,
+        strict=args.strict,
     )
 
 

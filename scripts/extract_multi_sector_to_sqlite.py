@@ -14,6 +14,7 @@ Example usage:
 """
 
 import argparse
+import os
 import sqlite3
 import sys
 import threading
@@ -31,13 +32,21 @@ try:
         DEFAULT_OUTPUT_DIR,
         DEFAULT_PROGRESS_EVERY_SYSTEMS,
         DEFAULT_PROGRESS_SECONDS,
+        EXIT_CANCELLED,
+        EXIT_FAILED,
+        EXIT_OK,
+        EXIT_REJECTED_RECORDS,
+        InputStats,
+        RejectedRecordError,
         detect_format,
         init_db,
         iter_systems_json_doc,
         iter_systems_jsonl,
         matches_prefix,
         process_system,
+        remove_quietly,
         sanitize_prefix,
+        staging_path,
         upsert_bodies,
         upsert_rings,
         upsert_systems,
@@ -51,26 +60,42 @@ except ImportError:
         DEFAULT_OUTPUT_DIR,
         DEFAULT_PROGRESS_EVERY_SYSTEMS,
         DEFAULT_PROGRESS_SECONDS,
+        EXIT_CANCELLED,
+        EXIT_FAILED,
+        EXIT_OK,
+        EXIT_REJECTED_RECORDS,
+        InputStats,
+        RejectedRecordError,
         detect_format,
         init_db,
         iter_systems_json_doc,
         iter_systems_jsonl,
         matches_prefix,
         process_system,
+        remove_quietly,
         sanitize_prefix,
+        staging_path,
         upsert_bodies,
         upsert_rings,
         upsert_systems,
     )
 
 class SectorSink:
-    """Per-sector SQLite connection + pending row buffers."""
+    """Per-sector SQLite connection + pending row buffers.
+
+    A sector with no existing database is written under a ".partial" name
+    and renamed into place by publish() once the run has completed; an
+    existing database is merged into directly."""
 
     def __init__(self, prefix: str, db_path: Path) -> None:
         self.prefix = prefix
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        self.fresh = not db_path.exists()
+        self.write_path = staging_path(db_path) if self.fresh else db_path
+        if self.fresh:
+            remove_quietly(self.write_path)  # leftover from an earlier failed run
+        self.conn = sqlite3.connect(self.write_path)
         try:
             init_db(self.conn)
         except Exception:
@@ -90,8 +115,12 @@ class SectorSink:
         self.body_rows.extend(body_rows)
         self.ring_rows.extend(ring_rows)
 
-    def pending(self) -> int:
-        return len(self.system_rows) + len(self.body_rows) + len(self.ring_rows)
+    def needs_flush(self, every_systems: int, every_bodies: int, every_rings: int) -> bool:
+        return (
+            len(self.system_rows) >= every_systems
+            or len(self.body_rows) >= every_bodies
+            or len(self.ring_rows) >= every_rings
+        )
 
     def flush(self) -> None:
         if not self.system_rows and not self.body_rows and not self.ring_rows:
@@ -109,8 +138,20 @@ class SectorSink:
         self.ring_rows.clear()
 
     def close(self) -> None:
-        self.flush()
-        self.conn.close()
+        """Flush what's pending and close the connection, which is closed
+        even if the flush fails (the failure is re-raised)."""
+        try:
+            self.flush()
+        finally:
+            self.conn.close()
+
+    def publish(self) -> None:
+        if self.fresh:
+            os.replace(self.write_path, self.db_path)
+
+    def discard(self) -> None:
+        if self.fresh:
+            remove_quietly(self.write_path)
 
 
 def build_sinks(
@@ -137,11 +178,18 @@ def run(
     progress_seconds: int = DEFAULT_PROGRESS_SECONDS,
     progress_every_systems: int = DEFAULT_PROGRESS_EVERY_SYSTEMS,
     cancel_event: Optional[threading.Event] = None,
+    strict: bool = False,
 ) -> int:
     """Extract multiple sectors' systems/bodies/rings in a single pass over the dump.
 
-    Return codes: 0 = success, 1 = input/format error, 130 = interrupted
-    (KeyboardInterrupt or cancel_event set).
+    Same conventions as extract_sector_systems_to_sqlite.run(): new databases
+    are published only on completion, `limit` caps input records scanned,
+    and unreadable records are skipped and reported (or stop the run in
+    strict mode). If one sector's database fails to write, the others are
+    still published and the run returns EXIT_FAILED.
+
+    Return codes: EXIT_OK (0), EXIT_FAILED (1), EXIT_REJECTED_RECORDS (3),
+    EXIT_CANCELLED (130); see extract_sector_systems_to_sqlite.
     """
     if not input_path.exists():
         print(f"Input file not found: {input_path}")
@@ -150,8 +198,9 @@ def run(
     parsed_format = detect_format(input_path)
     if parsed_format == "unknown":
         print("Unable to detect galaxy.json format (jsonl vs json document).")
-        return 1
+        return EXIT_FAILED
 
+    stats = InputStats(strict=strict)
     print(f"Extracting {len(sector_prefixes)} sector(s) in a single pass:")
     sinks = build_sinks(sector_prefixes, output_dir)
 
@@ -184,11 +233,12 @@ def run(
         )
 
     interrupted = False
+    failure: Optional[str] = None
     try:
         if parsed_format == "jsonl":
-            iterator = iter_systems_jsonl(input_path)
+            iterator = iter_systems_jsonl(input_path, stats)
         else:
-            iterator = iter_systems_json_doc(input_path)
+            iterator = iter_systems_json_doc(input_path, stats)
 
         for system in iterator:
             if cancel_event is not None and cancel_event.is_set():
@@ -196,9 +246,9 @@ def run(
                 print("Cancelled by user; flushing pending data...", flush=True)
                 break
 
-            systems_scanned += 1
-            if limit is not None and systems_scanned > limit:
+            if limit is not None and systems_scanned >= limit:
                 break
+            systems_scanned += 1
 
             if not isinstance(system, dict):
                 print_progress()
@@ -212,8 +262,10 @@ def run(
                             system, sink.prefix, case_insensitive
                         )
                         if system_row is not None:
+                            if system_row["x"] is None:
+                                stats.invalid_coords += 1
                             sink.add(system_row, body_list, ring_list)
-                            if sink.pending() >= commit_every_systems:
+                            if sink.needs_flush(commit_every_systems, commit_every_bodies, commit_every_rings):
                                 sink.flush()
                         break  # a system name can only belong to one sector prefix
 
@@ -222,12 +274,18 @@ def run(
     except KeyboardInterrupt:
         interrupted = True
         print("KeyboardInterrupt received; flushing pending data...", flush=True)
+    except RejectedRecordError as exc:
+        failure = f"Stopped at the first unreadable record (strict mode): {exc}"
+    except Exception as exc:
+        failure = f"Extraction failed: {type(exc).__name__}: {exc}"
     finally:
+        failed_sinks = []
         for sink in sinks:
             try:
                 sink.close()
             except Exception as exc:
-                print(f"  WARNING: error closing sink for {sink.prefix!r}: {exc}")
+                failed_sinks.append(sink)
+                print(f"  ERROR: could not finish writing {sink.prefix!r}: {type(exc).__name__}: {exc}")
 
     elapsed = time.monotonic() - start_time
     elapsed_minutes = elapsed / 60.0 if elapsed > 0 else 0.0
@@ -237,16 +295,29 @@ def run(
     print(f"Systems scanned: {systems_scanned}")
     print(f"Elapsed minutes: {elapsed_minutes:.2f}")
     print(f"Average rate: {rate:.2f} systems/sec")
+    stats.report()
     print()
+    whole_run_stopped = bool(failure) or interrupted
     for sink in sinks:
+        if whole_run_stopped or sink in failed_sinks:
+            sink.discard()
+            outcome = "not written" if sink.fresh else "existing database kept (may hold part of this run's updates)"
+        else:
+            sink.publish()
+            outcome = str(sink.db_path)
         print(
             f"  {sink.prefix!r}: {sink.systems_written} systems, "
-            f"{sink.bodies_written} bodies, {sink.rings_written} rings -> {sink.db_path}"
+            f"{sink.bodies_written} bodies, {sink.rings_written} rings -> {outcome}"
         )
 
+    if failure:
+        print(failure)
+        return EXIT_FAILED
     if interrupted:
-        return 130
-    return 0
+        return EXIT_CANCELLED
+    if failed_sinks:
+        return EXIT_FAILED
+    return EXIT_REJECTED_RECORDS if stats.rejected else EXIT_OK
 
 
 def main() -> int:
@@ -263,7 +334,11 @@ def main() -> int:
     parser.add_argument("--output_dir", default=str(DEFAULT_OUTPUT_DIR))
     parser.add_argument("--case_insensitive", action="store_true", default=True)
     parser.add_argument("--case_sensitive", action="store_true")
-    parser.add_argument("--limit", type=int, default=None, help="Stop after scanning this many systems (sampling)")
+    parser.add_argument("--limit", type=int, default=None, help="Stop after scanning this many input records (sampling)")
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="Stop at the first unreadable input record instead of skipping and reporting it",
+    )
     parser.add_argument("--commit-every-systems", type=int, default=DEFAULT_COMMIT_EVERY_SYSTEMS)
     parser.add_argument("--commit-every-bodies", type=int, default=DEFAULT_COMMIT_EVERY_BODIES)
     parser.add_argument("--commit-every-rings", type=int, default=DEFAULT_COMMIT_EVERY_RINGS)
@@ -282,6 +357,7 @@ def main() -> int:
         commit_every_rings=args.commit_every_rings,
         progress_seconds=args.progress_seconds,
         progress_every_systems=args.progress_every_systems,
+        strict=args.strict,
     )
 
 

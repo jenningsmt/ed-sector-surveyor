@@ -1,11 +1,16 @@
 """Orchestrates the gap-analysis pipeline for the GUI: per selected sector,
-extract -> bracketed gaps -> backward (and optionally forward) extrapolation,
-then aggregate this session's candidate files into one master candidate list
-and group each sector's candidates into survey clusters.
+extract -> bracketed gaps -> backward extrapolation, then aggregate this
+session's candidate files into one master candidate list and group each
+sector's candidates into survey clusters.
 
 Each stage is a thin call into the existing scripts/ modules' run() functions
 -- no pipeline logic is duplicated here, only sequencing, logging, and
 cooperative-cancellation checks between stages.
+
+Return codes (see gui/worker.py): 0 completed; 1 setup or input error;
+2 finished, but at least one stage failed (independent sectors still run);
+3 completed, but extraction skipped unreadable input records; 130 cancelled.
+An empty result (no candidates, nothing to cluster) is not a failure.
 """
 
 from __future__ import annotations
@@ -35,6 +40,12 @@ from scripts.extract_sector_systems_to_sqlite import sanitize_prefix
 # deliberate: it's only used to decide whether to show the confirmation prompt,
 # and actual runs are often faster than this once a sector has been run before.
 LARGE_RUN_WARN_SECONDS = 3600
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_STAGES_FAILED = 2
+EXIT_REJECTED_RECORDS = extract_multi_sector_to_sqlite.EXIT_REJECTED_RECORDS
+EXIT_CANCELLED = 130
 
 
 def sector_db_path(project_dir: Path, sector: str) -> Path:
@@ -81,10 +92,6 @@ def _estimate_candidates_from_names(
             names, config.get("extend_depth", 5)
         )
         per_stage["Backward extrapolation"] = len(bwd)
-
-    if stages.get("forward_extrap", False):
-        fwd = gap_extrapolate_export.build_forward_step1_candidates(names)
-        per_stage["Forward extrapolation (step 1 only; chain steps not estimated)"] = len(fwd)
 
     return per_stage
 
@@ -196,14 +203,28 @@ def _detect_sector_from_system(system_name: str) -> str:
     return " ".join(tokens[:idx])
 
 
+def _finish(failed_stages: list[str], rejected_input: bool = False) -> int:
+    """Final summary line and return code for a run that wasn't cancelled."""
+    if failed_stages:
+        print(f"\n=== Pipeline finished with {len(failed_stages)} failed stage(s) ===")
+        for stage in failed_stages:
+            print(f"  - {stage}")
+        return EXIT_STAGES_FAILED
+    print("\n=== Pipeline complete ===")
+    if rejected_input:
+        print("  Note: extraction skipped unreadable records in the galaxy dump (see the extraction summary above).")
+        return EXIT_REJECTED_RECORDS
+    return EXIT_OK
+
+
 def run_pipeline(
     config: dict[str, Any],
     cancel_event: Optional[threading.Event] = None,
     confirm_cb: Optional[Callable[[dict], bool]] = None,
 ) -> int:
     """Dispatch to the sector-prefix ("gap") or radius-around-a-system
-    ("spatial") pipeline based on config["mode"]. Returns 0 on normal
-    completion, 130 if cancelled partway through, 1 on a config/setup error.
+    ("spatial") pipeline based on config["mode"]. See the module docstring
+    for return codes.
 
     confirm_cb, if given, is called with a payload dict (see
     _format_large_run_message) whenever a sector's estimated EDSM-validated
@@ -223,8 +244,9 @@ def _run_gap_pipeline(
     cancel_event: Optional[threading.Event] = None,
     confirm_cb: Optional[Callable[[dict], bool]] = None,
 ) -> int:
-    """Run the configured stages for config["sectors"]. Returns 0 on normal
-    completion, 130 if cancelled partway through."""
+    """Run the configured stages for config["sectors"]. A stage that raises is
+    logged and recorded as failed; the remaining stages and sectors still run,
+    and the overall return code reports the failure."""
     project_dir = Path(config["project_dir"])
     galaxy_dump_path = Path(config["galaxy_dump_path"])
     out_dir = project_dir / "out"
@@ -235,6 +257,8 @@ def _run_gap_pipeline(
     dry_run: bool = bool(config.get("dry_run", True))
     session_started = datetime.now(timezone.utc)
     sector_files: dict[str, list[Path]] = {sector: [] for sector in sectors}
+    failed_stages: list[str] = []
+    rejected_input = False
 
     if not sectors:
         print("No sectors selected. Nothing to do.")
@@ -258,10 +282,12 @@ def _run_gap_pipeline(
             output_dir=project_dir / "data" / "sector_library",
             cancel_event=cancel_event,
         )
-        if rc == 130 or _cancelled(cancel_event):
+        if rc == EXIT_CANCELLED or _cancelled(cancel_event):
             print("Cancelled during extraction.")
-            return 130
-        if rc != 0:
+            return EXIT_CANCELLED
+        if rc == EXIT_REJECTED_RECORDS:
+            rejected_input = True
+        elif rc != EXIT_OK:
             print(f"Extraction failed (return code {rc}); stopping.")
             return rc
         print()
@@ -282,7 +308,8 @@ def _run_gap_pipeline(
                 sector_summary_export.generate_summary_report(summary, out_path)
                 print(f"  {sector}: summary written to {out_path}")
             except Exception as exc:
-                print(f"  SKIP summary for {sector!r}: {exc}")
+                print(f"  FAILED summary for {sector!r}: {exc}")
+                failed_stages.append(f"sector summary ({sector})")
         print()
 
     if _cancelled(cancel_event):
@@ -300,7 +327,7 @@ def _run_gap_pipeline(
             return 1
 
     # -------------------------------------------------------------------
-    # Per-sector: bracketed gaps + backward/forward extrapolation
+    # Per-sector: bracketed gaps + backward extrapolation
     # -------------------------------------------------------------------
     for sector in sectors:
         if _cancelled(cancel_event):
@@ -309,17 +336,14 @@ def _run_gap_pipeline(
 
         db_path = sector_db_path(project_dir, sector)
         if not db_path.exists():
-            print(f"SKIP {sector!r}: no sector DB found at {db_path} (run extraction first).")
+            print(f"FAILED {sector!r}: no sector DB found at {db_path} (run extraction first).")
+            failed_stages.append(f"{sector}: no extracted sector database")
             continue
 
         print(f">>> Sector: {sector}")
 
         skip_edsm_stages = False
-        edsm_stages_enabled = (
-            stages.get("bracketed_gaps", True)
-            or stages.get("backward_extrap", True)
-            or stages.get("forward_extrap", False)
-        )
+        edsm_stages_enabled = stages.get("bracketed_gaps", True) or stages.get("backward_extrap", True)
         if edsm_stages_enabled and not dry_run:
             try:
                 estimate = _estimate_edsm_stage_candidates(db_path, sector, stages, config)
@@ -343,31 +367,26 @@ def _run_gap_pipeline(
                     cancel_event=cancel_event,
                 )
             except Exception as exc:
-                print(f"  SKIP bracketed gaps for {sector!r}: {exc}")
+                print(f"  FAILED bracketed gaps for {sector!r}: {exc}")
+                failed_stages.append(f"bracketed gaps ({sector})")
             if _cancelled(cancel_event):
                 return 130
 
-        run_backward = stages.get("backward_extrap", True) and not skip_edsm_stages
-        run_forward = stages.get("forward_extrap", False) and not skip_edsm_stages
-        if run_backward or run_forward:
-            direction = "both" if (run_backward and run_forward) else (
-                "forward" if run_forward else "backward"
-            )
-            print(f"  -- Extrapolation ({sector}, direction={direction}) --")
+        if stages.get("backward_extrap", True) and not skip_edsm_stages:
+            print(f"  -- Backward extrapolation ({sector}) --")
             try:
                 sector_files[sector] += gap_extrapolate_export.run(
                     db_path=db_path,
                     sector=sector,
                     out_dir=out_dir,
                     extend_depth=config.get("extend_depth", 5),
-                    direction=direction,
-                    max_forward_step=config.get("max_forward_step", 5),
                     dry_run=dry_run,
                     cache_db_path=None,
                     cancel_event=cancel_event,
                 )
             except Exception as exc:
-                print(f"  SKIP extrapolation for {sector!r}: {exc}")
+                print(f"  FAILED backward extrapolation for {sector!r}: {exc}")
+                failed_stages.append(f"backward extrapolation ({sector})")
             if _cancelled(cancel_event):
                 return 130
 
@@ -376,7 +395,8 @@ def _run_gap_pipeline(
             try:
                 bio_opportunity_export.run(db_path=db_path, sector=sector, out_dir=out_dir)
             except Exception as exc:
-                print(f"  SKIP bio opportunity export for {sector!r}: {exc}")
+                print(f"  FAILED bio opportunity export for {sector!r}: {exc}")
+                failed_stages.append(f"stale exobiology candidates ({sector})")
             if _cancelled(cancel_event):
                 return 130
 
@@ -400,12 +420,13 @@ def _run_gap_pipeline(
             if _cancelled(cancel_event):
                 print("Cancelled before survey clustering.")
                 return 130
-            if sector_files[sector]:
-                _run_clustering(config, sector_db_path(project_dir, sector), sector,
-                                sector_files[sector], out_dir, dry_run, start=cluster_start)
+            if sector_files[sector] and not _run_clustering(
+                config, sector_db_path(project_dir, sector), sector,
+                sector_files[sector], out_dir, dry_run, start=cluster_start,
+            ):
+                failed_stages.append(f"survey clusters ({sector})")
 
-    print("\n=== Pipeline complete ===")
-    return 0
+    return _finish(failed_stages, rejected_input)
 
 
 def _run_aggregation(
@@ -413,7 +434,7 @@ def _run_aggregation(
 ) -> None:
     """Aggregate only the candidate files this session wrote -- never a scan
     of out_dir, which would sweep in every earlier run's sectors and stale
-    files (e.g. forward-extrapolation CSVs from a run that had it enabled).
+    files (e.g. candidate CSVs for sectors that weren't part of this run).
     Each session gets its own timestamped master file."""
     print(">>> Stage: aggregation")
     rows = aggregate_gap_master_list.load_rows_from_files(session_files)
@@ -458,11 +479,13 @@ def _run_clustering(
     dry_run: bool,
     label: Optional[str] = None,
     start: Optional[tuple[tuple[float, float, float], str]] = None,
-) -> None:
+) -> bool:
+    """Returns False if clustering raised (logged); True otherwise,
+    including when there was nothing to cluster."""
     print(f">>> Stage: survey clusters ({label or sector})")
     if dry_run:
         print("  Skipped: dry-run output has no EDSM-validated candidates to cluster.")
-        return
+        return True
     try:
         gap_cluster_export.run(
             db_path=db_path,
@@ -476,7 +499,9 @@ def _run_clustering(
             start_label=start[1] if start else None,
         )
     except Exception as exc:
-        print(f"  SKIP survey clusters for {label or sector!r}: {exc}")
+        print(f"  FAILED survey clusters for {label or sector!r}: {exc}")
+        return False
+    return True
 
 
 def _run_spatial_pipeline(
@@ -595,9 +620,11 @@ def _run_spatial_pipeline(
             scope=f"Spatial search: {center_system} within {radius_ly} ly ({sector})",
         )
 
-    if stages.get("cluster", True) and session_files:
-        _run_clustering(config, db_path, sector, session_files, out_dir, dry_run,
-                        label=f"{sector} spatial {center_system}", start=cluster_start)
+    failed_stages: list[str] = []
+    if stages.get("cluster", True) and session_files and not _run_clustering(
+        config, db_path, sector, session_files, out_dir, dry_run,
+        label=f"{sector} spatial {center_system}", start=cluster_start,
+    ):
+        failed_stages.append("survey clusters")
 
-    print("\n=== Pipeline complete ===")
-    return 0
+    return _finish(failed_stages)

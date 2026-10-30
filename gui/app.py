@@ -10,7 +10,7 @@ from typing import Any
 
 from gui import config as config_module
 from gui import pipeline
-from gui.worker import DONE_SENTINEL, Worker
+from gui.worker import DONE_SENTINEL, Worker, describe_exit
 
 MAX_LOG_LINES = 5000
 POLL_INTERVAL_MS = 100
@@ -125,7 +125,6 @@ class App:
             "extract": tk.BooleanVar(value=stages.get("extract", True)),
             "bracketed_gaps": tk.BooleanVar(value=stages.get("bracketed_gaps", True)),
             "backward_extrap": tk.BooleanVar(value=stages.get("backward_extrap", True)),
-            "forward_extrap": tk.BooleanVar(value=stages.get("forward_extrap", False)),
             "aggregate": tk.BooleanVar(value=stages.get("aggregate", True)),
             "cluster": tk.BooleanVar(value=stages.get("cluster", True)),
             "bio_opportunity": tk.BooleanVar(value=stages.get("bio_opportunity", False)),
@@ -134,14 +133,13 @@ class App:
             "extract": "Extract sectors from galaxy dump",
             "bracketed_gaps": "Bracketed gaps (intra-sequence)",
             "backward_extrap": "Backward extrapolation",
-            "forward_extrap": "Forward extrapolation (advanced)",
             "aggregate": "Aggregate master candidate list",
             "cluster": "Survey clusters (group candidates by location, with map)",
             "bio_opportunity": "Stale exobiology candidates (pre-Odyssey, unrevisited)",
         }
         self.stage_checkbuttons: dict[str, ttk.Checkbutton] = {}
         for key in (
-            "extract", "bracketed_gaps", "backward_extrap", "forward_extrap",
+            "extract", "bracketed_gaps", "backward_extrap",
             "aggregate", "cluster", "bio_opportunity",
         ):
             cb = ttk.Checkbutton(stages_frame, text=labels[key], variable=self.stage_vars[key])
@@ -154,7 +152,6 @@ class App:
 
         self.max_bracket_width_var = tk.StringVar(value=str(self.config.get("max_bracket_width", 25)))
         self.extend_depth_var = tk.StringVar(value=str(self.config.get("extend_depth", 5)))
-        self.max_forward_step_var = tk.StringVar(value=str(self.config.get("max_forward_step", 5)))
         self.cluster_ly_var = tk.StringVar(value=str(self.config.get("cluster_ly", 150)))
         self.cluster_region_ly_var = tk.StringVar(value=str(self.config.get("cluster_region_ly", 450)))
         self.cluster_start_var = tk.StringVar(value=str(self.config.get("cluster_start", "")))
@@ -166,20 +163,18 @@ class App:
         ttk.Entry(grid, textvariable=self.max_bracket_width_var, width=8).grid(row=0, column=1, sticky="w")
         ttk.Label(grid, text="Backward extend depth:").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(grid, textvariable=self.extend_depth_var, width=8).grid(row=1, column=1, sticky="w")
-        ttk.Label(grid, text="Max forward step:").grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.max_forward_step_var, width=8).grid(row=2, column=1, sticky="w")
-        ttk.Label(grid, text="Survey cluster size (ly):").grid(row=3, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.cluster_ly_var, width=8).grid(row=3, column=1, sticky="w")
-        ttk.Label(grid, text="Survey region size (ly):").grid(row=4, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.cluster_region_ly_var, width=8).grid(row=4, column=1, sticky="w")
-        ttk.Label(grid, text="Survey start:").grid(row=5, column=0, sticky="w", pady=2)
-        ttk.Entry(grid, textvariable=self.cluster_start_var, width=40).grid(row=5, column=1, sticky="w")
+        ttk.Label(grid, text="Survey cluster size (ly):").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.cluster_ly_var, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Label(grid, text="Survey region size (ly):").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.cluster_region_ly_var, width=8).grid(row=3, column=1, sticky="w")
+        ttk.Label(grid, text="Survey start:").grid(row=4, column=0, sticky="w", pady=2)
+        ttk.Entry(grid, textvariable=self.cluster_start_var, width=40).grid(row=4, column=1, sticky="w")
         ttk.Label(
             grid,
             text="System name (any extracted sector) or x, y, z. Blank: Sol in Gap mode, "
                  "the center system in Spatial mode.",
             wraplength=560, justify="left", foreground="#666666",
-        ).grid(row=6, column=0, columnspan=2, sticky="w")
+        ).grid(row=5, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(
             params_frame,
             text="Dry run (skip EDSM validation -- check candidate volume first)",
@@ -212,13 +207,13 @@ class App:
             self.sector_frame.pack_forget()
             if not self.spatial_frame.winfo_ismapped():
                 self.spatial_frame.pack(fill="x", padx=6, pady=6, after=self.mode_frame)
-            for key in ("extract", "forward_extrap", "bio_opportunity"):
+            for key in ("extract", "bio_opportunity"):
                 self.stage_checkbuttons[key].configure(state="disabled")
         else:  # gap
             self.spatial_frame.pack_forget()
             if not self.sector_frame.winfo_ismapped():
                 self.sector_frame.pack(fill="x", padx=6, pady=6, after=self.mode_frame)
-            for key in ("extract", "forward_extrap", "bio_opportunity"):
+            for key in ("extract", "bio_opportunity"):
                 self.stage_checkbuttons[key].configure(state="normal")
 
     def _add_sector(self) -> None:
@@ -297,7 +292,6 @@ class App:
         self.config["spatial_sector_override"] = self.spatial_sector_override_var.get().strip()
         self.config["max_bracket_width"] = _int_or(self.max_bracket_width_var.get(), 25)
         self.config["extend_depth"] = _int_or(self.extend_depth_var.get(), 5)
-        self.config["max_forward_step"] = _int_or(self.max_forward_step_var.get(), 5)
         cluster_ly = _int_or(self.cluster_ly_var.get(), 150)
         region_ly = _int_or(self.cluster_region_ly_var.get(), 450)
         if not 0 < cluster_ly <= region_ly:
@@ -368,7 +362,7 @@ class App:
     def _on_job_done(self, returncode: str) -> None:
         self.run_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
-        self.status_label.configure(text=f"Idle (last run exit={returncode})")
+        self.status_label.configure(text=f"Idle (last run {describe_exit(returncode)})")
 
     # ------------------------------------------------------------------
     # Log polling

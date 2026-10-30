@@ -42,7 +42,6 @@ def _count_systems(db: Path) -> int:
 
 
 class WorkerStatusTests(unittest.TestCase):
-    @known_defect
     def test_exception_reports_failure_status(self):
         """E01: a job that raises must not finish with __job_done__:0."""
         w = worker_module.Worker()
@@ -75,7 +74,6 @@ class ExtractionDefectTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    @known_defect
     def test_final_flush_failure_returns_nonzero(self):
         """E01: a failed final flush in the multi-sector extractor must not return 0."""
         _write_jsonl(self.dump, [json.dumps(_system())])
@@ -99,7 +97,6 @@ class ExtractionDefectTests(unittest.TestCase):
             for sink in sinks:
                 sink.conn.close()
 
-    @known_defect
     def test_corrupt_jsonl_line_is_reported(self):
         """E02: a malformed line must be counted and reported, not skipped silently."""
         _write_jsonl(self.dump, [json.dumps(_system()), "{invalid json}", json.dumps(_system("Audit AA-A a1", 2))])
@@ -110,7 +107,6 @@ class ExtractionDefectTests(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("rejected", log.getvalue().lower())
 
-    @known_defect
     def test_limit_one_extracts_one_system(self):
         """P2: limit=1 must extract one record, not zero."""
         _write_jsonl(self.dump, [json.dumps(_system())])
@@ -121,7 +117,6 @@ class ExtractionDefectTests(unittest.TestCase):
 
 
 class PipelineStatusTests(unittest.TestCase):
-    @known_defect
     def test_failed_required_stage_is_not_complete_success(self):
         """E01: a required stage that raises must make the run return nonzero."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,7 +129,7 @@ class PipelineStatusTests(unittest.TestCase):
             _write_jsonl(dump, [json.dumps(_system())])
             config = {
                 "project_dir": str(project), "galaxy_dump_path": str(dump), "sectors": ["Audit"], "dry_run": True,
-                "stages": {"extract": False, "bracketed_gaps": True, "backward_extrap": False, "forward_extrap": False,
+                "stages": {"extract": False, "bracketed_gaps": True, "backward_extrap": False,
                            "bio_opportunity": False, "aggregate": False, "cluster": False},
             }
             log = io.StringIO()

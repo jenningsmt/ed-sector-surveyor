@@ -63,8 +63,8 @@ class SessionAggregationTest(unittest.TestCase):
 
     def test_master_contains_only_this_sessions_files(self):
         # Left over from earlier sessions: another sector entirely, and a
-        # forward-extrapolation file for the same sector from a run that had
-        # forward extrapolation enabled.
+        # forward-extrapolation file for the same sector from a version that
+        # still had forward extrapolation (removed in v1.7.0).
         write_candidate_csv(self.out_dir / "beta_gap_full_validated.csv", "Beta", ["AB-C c3-9"])
         write_candidate_csv(self.out_dir / "alpha_extrap_forward_step1_validated.csv", "Alpha", ["AB-C c3-8"])
         # This session's output.
@@ -126,12 +126,9 @@ class StageRunReturnsWrittenFilesTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             written = gap_extrapolate_export.run(
                 db_path=self.db, sector="Alpha", out_dir=self.out_dir, extend_depth=2,
-                direction="both", max_forward_step=3, dry_run=True, cache_db_path=None,
+                dry_run=True, cache_db_path=None,
             )
-        self.assert_written(written, [
-            "alpha_extrap_backward_dry_run.csv", "alpha_extrap_backward_dry_run.md",
-            "alpha_extrap_forward_step1_dry_run.csv", "alpha_extrap_forward_step1_dry_run.md",
-        ])
+        self.assert_written(written, ["alpha_extrap_backward_dry_run.csv", "alpha_extrap_backward_dry_run.md"])
 
     def test_gap_spatial_export(self):
         with contextlib.redirect_stdout(io.StringIO()):

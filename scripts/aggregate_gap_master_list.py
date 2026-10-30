@@ -13,9 +13,9 @@ Deliberately does NOT invent a composite priority/confidence score: the
 underlying scripts don't compute one (see docs/gap-finder.md, which describes
 a fancier scoring methodology that was never implemented). Ordering is honest
 and structural: bracketed gaps first (strongest evidence — missing on both
-sides), then backward extrapolation, then forward-chain extrapolation
-(sub-sorted by steps_from_edge ascending, since confidence decays the further
-a chain has been extended past its last EDSM-confirmed system).
+sides), then backward extrapolation (sub-sorted by steps_from_edge
+ascending, since confidence decays the further a guess sits from the known
+range).
 
 The GUI pipeline doesn't scan out/: it passes the files written in that
 session to load_rows_from_files() so its master list is session-specific.
@@ -43,7 +43,7 @@ except ImportError:
     import gap_naming
 
 CANDIDATE_TYPE_ORDER = {
-    "bracketed_gap": 0, "backward_extrap": 1, "forward_extrap": 2,
+    "bracketed_gap": 0, "backward_extrap": 1,
     "spatial_gap": 3, "spatial_backward_extrap": 4,
 }
 
@@ -51,11 +51,8 @@ CANDIDATE_TYPE_ORDER = {
 RE_GAP_FULL = re.compile(r"^(?P<slug>.+)_gap_full(?:_validated|_dry_run)\.csv$")
 # Matches "<slug>_extrap_backward_validated.csv" / "..._dry_run.csv"
 RE_BACKWARD = re.compile(r"^(?P<slug>.+)_extrap_backward(?:_validated|_dry_run)\.csv$")
-# Matches "<slug>_extrap_forward_step1_validated.csv" and
-# "<slug>_extrap_forward_step{N}_chain_validated.csv" (N >= 2) — NOT chain_summary.csv
-RE_FORWARD = re.compile(
-    r"^(?P<slug>.+)_extrap_forward_step\d+(?:_chain)?(?:_validated|_dry_run)\.csv$"
-)
+# Forward-extrapolation files (*_extrap_forward_step*.csv) from versions before
+# 1.7.0 are deliberately not recognized: that feature was removed.
 # Matches "<slug>_spatial_gap_validated.csv" / "<slug>_spatial_backward_validated.csv"
 # written by gap_spatial_export.py (radius-around-a-system search).
 RE_SPATIAL_GAP = re.compile(r"^(?P<slug>.+)_spatial_gap(?:_validated|_dry_run)\.csv$")
@@ -96,9 +93,6 @@ def classify_file(path: Path) -> Optional[tuple[str, str]]:
     m = RE_BACKWARD.match(name)
     if m:
         return m.group("slug"), "backward_extrap"
-    m = RE_FORWARD.match(name)
-    if m:
-        return m.group("slug"), "forward_extrap"
     m = RE_SPATIAL_GAP.match(name)
     if m:
         return m.group("slug"), "spatial_gap"
@@ -178,7 +172,7 @@ def sort_key(row: Row):
         number = 0
     # In-game order first (sector -> subsector -> mass code -> boxel -> serial)
     # so candidates near each other on the map land together regardless of
-    # which methodology (bracketed gap / backward / forward / spatial) found
+    # which methodology (bracketed gap / backward / spatial) found
     # them; candidate type and steps_from_edge are trailing tiebreakers only.
     return (
         row.sector_slug,
@@ -235,26 +229,24 @@ def write_master_md(
         f.write(
             "> Candidates are hypotheses, not confirmed systems. `bracketed_gap` "
             "(missing number strictly between two known systems in a naming "
-            "family) is the strongest evidence; `backward_extrap` and "
-            "`forward_extrap` are extrapolated beyond the known range and only "
-            "as reliable as the `steps_from_edge` value — lower is better.\n\n"
+            "family) is the strongest evidence; `backward_extrap` is extrapolated "
+            "below the known range and only as reliable as the `steps_from_edge` "
+            "value — lower is better.\n\n"
         )
         f.write("## Summary\n\n")
-        f.write("| Sector | Bracketed Gap | Backward Extrap | Forward Extrap | Spatial Gap | Spatial Backward | Total |\n")
-        f.write("|--------|--------------:|-----------------:|----------------:|------------:|-----------------:|------:|\n")
+        f.write("| Sector | Bracketed Gap | Backward Extrap | Spatial Gap | Spatial Backward | Total |\n")
+        f.write("|--------|--------------:|-----------------:|------------:|-----------------:|------:|\n")
         for sector_slug in sorted(by_sector):
             bg = counts_by_sector_type.get((sector_slug, "bracketed_gap"), 0)
             be = counts_by_sector_type.get((sector_slug, "backward_extrap"), 0)
-            fe = counts_by_sector_type.get((sector_slug, "forward_extrap"), 0)
             sg = counts_by_sector_type.get((sector_slug, "spatial_gap"), 0)
             sb = counts_by_sector_type.get((sector_slug, "spatial_backward_extrap"), 0)
-            f.write(f"| {sector_slug} | {bg} | {be} | {fe} | {sg} | {sb} | {bg + be + fe + sg + sb} |\n")
+            f.write(f"| {sector_slug} | {bg} | {be} | {sg} | {sb} | {bg + be + sg + sb} |\n")
         f.write("\n---\n\n")
 
         type_labels = {
             "bracketed_gap": "Bracketed Gaps (intra-sequence)",
             "backward_extrap": "Backward Extrapolation (below known min)",
-            "forward_extrap": "Forward Extrapolation (beyond known max, chain-confirmed)",
             "spatial_gap": "Spatial Search — Bracketed Gaps",
             "spatial_backward_extrap": "Spatial Search — Backward Extrapolation",
         }
@@ -267,7 +259,7 @@ def write_master_md(
                 by_type[row.candidate_type].append(row)
 
             for candidate_type in (
-                "bracketed_gap", "backward_extrap", "forward_extrap",
+                "bracketed_gap", "backward_extrap",
                 "spatial_gap", "spatial_backward_extrap",
             ):
                 type_rows = by_type.get(candidate_type)
