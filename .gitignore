@@ -8,3 +8,10 @@ build/
 dist/
 dist-installer/
 Checklist Results/
+
+# Scratch output and Word lock files
+tmp/
+~$*
+
+# Elite Dangerous journals (private game logs)
+data/Journal.*.log
