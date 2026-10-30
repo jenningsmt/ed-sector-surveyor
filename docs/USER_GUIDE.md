@@ -1,6 +1,6 @@
 # ED Sector Surveyor: User Guide
 
-*For ED Sector Surveyor v1.6.0 and later.*
+*For ED Sector Surveyor v1.7.0 and later.*
 
 This guide is for Elite Dangerous explorers who want to find systems nobody has discovered yet. You don't need to know any programming, and you don't need to have explored much before. If you can plot a route in the Galaxy Map, you can use this tool.
 
@@ -75,7 +75,7 @@ This matters because an undiscovered system has no known coordinates, but its bo
 - **Bracketed gaps** (the strongest evidence). A missing number sits *between* two known numbers in the same sequence. For example, `...d13-12` and `...d13-14` are known but `...d13-13` isn't. Known systems box it in on both sides.
 - **Backward extrapolation** (weaker evidence). Sequences start at 0. If the lowest known number is `-5`, then `-4`, `-3`, `-2`, `-1` and `-0` probably exist too. The candidate's **steps from edge** tells you how far below the lowest known number it is: 1 means right next to it, and lower is more likely.
 
-There's also **forward extrapolation**, which guesses numbers *above* the highest known one. It's marked "advanced" and is off by default, because it's much less reliable.
+Versions before 1.7.0 also offered **forward extrapolation**, which guessed numbers *above* the highest known one. It was removed because most of its guesses were numbers the game never used, and there's no way to weed those out at scale without automating Galaxy Map searches, which Frontier's terms don't allow.
 
 ### Idea 5: "Not in EDSM" doesn't mean "undiscovered"
 
@@ -130,6 +130,7 @@ If the dump path is wrong, the app tells you and switches to this tab when you p
 
 ## 4. A tour of the window
 
+<!-- SCREENSHOT NEEDED: v1.7.0 Run tab. The 1.6.0 image below still shows the Forward extrapolation stage and the Max forward step field, which 1.7.0 removes. -->
 ![The Run tab in ED Sector Surveyor 1.6.0](images/run-tab-v1.6.0.jpg)
 
 The **Run** tab is where you'll spend your time. From top to bottom:
@@ -156,7 +157,6 @@ Each checkbox is one step of the job. The defaults are right for most runs.
 | Extract sectors from galaxy dump | Copies the chosen sectors out of the giant dump into small, fast files. Slow (see the warning below). Only needed once per sector, or after you download a new dump. | On |
 | Bracketed gaps (intra-sequence) | Finds bracketed-gap candidates. | On |
 | Backward extrapolation | Finds backward candidates. | On |
-| Forward extrapolation (advanced) | Finds forward candidates. Less reliable. | Off |
 | Aggregate master candidate list | Combines everything from this run into one list. | On |
 | Survey clusters (group candidates by location, with map) | Groups candidates into regions and clusters, suggests a visiting order, and draws a map. | On |
 | Stale exobiology candidates (pre-Odyssey, unrevisited) | A separate bonus feature: lists bodies with biological signals nobody has rechecked since Odyssey launched. Possibly unsampled exobiology. | Off |
@@ -169,7 +169,6 @@ Each checkbox is one step of the job. The defaults are right for most runs.
 |---|---|---|
 | Max bracket width | Ignore gaps wider than this. A gap from 3 to 40 is more likely unused numbers than 36 missing systems. | 25 |
 | Backward extend depth | How far below the lowest known number to guess. | 5 |
-| Max forward step | How far above the highest known number forward extrapolation may go. | 5 |
 | Survey cluster size (ly) | The largest a single survey cluster can be, measured across. | 150 |
 | Survey region size (ly) | The largest a region (a group of clusters) can be. Must be at least as big as the cluster size. | 450 |
 | Dry run | **Ticked:** count the candidates without checking EDSM. Takes seconds. **Unticked:** check every candidate against EDSM. Slow, but this is what produces your real list. | Ticked |
@@ -178,8 +177,9 @@ Each checkbox is one step of the job. The defaults are right for most runs.
 
 ### Run, Cancel and the Log
 
-- **Run** starts the job. **Cancel** stops it cleanly, and anything already finished is kept.
+- **Run** starts the job. **Cancel** stops it cleanly, and anything already finished is kept. The one exception is a sector's first extraction: if you cancel it, nothing is saved for that sector, so you don't end up with a half-extracted sector that looks complete.
 - The **Log** shows progress, and the line telling you where each output file was saved.
+- The **status** next to Cancel tells you how the last run ended: *completed*, *failed*, *finished with failed stages* (some steps worked and some didn't; the log says which), *completed, skipping unreadable input records* (see Section 8), or *cancelled*.
 - **Big-job warning:** if a run looks like it will take more than an hour of EDSM checks, the app shows you the estimate and asks before going ahead.
 
 ### Where your results go
@@ -452,8 +452,14 @@ Before each expedition. For a bigger refresh, download a new dump every few mont
 **Can I change the cluster sizes?**
 Yes: **Survey cluster size** and **Survey region size** under Parameters. Make clusters smaller (say 80 ly) if you fly a short-range ship or want tighter evenings. Make them larger if you want fewer, bigger stops.
 
-**Should I use Forward extrapolation?**
-Not to start with. It guesses beyond the end of known sequences, so far more of its guesses turn out to be numbers that were never used.
+**The status says "finished with failed stages."**
+At least one step hit an error. Everything else still ran. The end of the log lists the failed steps, and each one's error appears earlier in the log, marked FAILED.
+
+**The status says "completed, skipping unreadable input records."**
+A few records in your galaxy dump couldn't be read, usually because the download was damaged. The extraction finished without them, and the summary in the log says how many. If it's more than a handful, download a fresh dump and extract again.
+
+**Where did Forward extrapolation go?**
+It was removed in v1.7.0 (see [Idea 4](#idea-4-the-two-ways-the-tool-finds-candidates)). A saved setting from an older version is ignored.
 
 ---
 
