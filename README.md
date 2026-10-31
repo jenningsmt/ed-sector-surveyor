@@ -657,6 +657,10 @@ maintained by others, freely made available to the community:
   tool. None of this works without that ongoing, uncompensated community
   contribution.
 
+## How this was built
+
+Built with AI-assisted development. I wrote the requirements, data model, and architecture rules, and directed AI coding assistants to implement them. Every change went through my review and the automated test suite before release. Design notes are in [`docs/gap-finder.md`](docs/gap-finder.md).
+
 ## Code signing policy
 
 Free code signing provided by [SignPath.io](https://about.signpath.io),
